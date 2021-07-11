@@ -3,6 +3,7 @@ import argparse
 import collections.abc
 import copy
 import enum
+import inspect
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Union, Set, TypeVar, Type, Mapping
+from typing import Any, Dict, Optional, List, Union, Set, TypeVar, Type, Mapping, Callable
 
 ##
 # Global Definitions
@@ -44,7 +45,7 @@ class AsDict:
     """
 
     def as_dict(self, params: Dict = None) -> Dict:
-        return dict_as_dict(self, params)
+        return obj_as_dict(self, lambda n, v: not callable(v) and not n.startswith("_"))
 
     def d_serialize(self) -> Dict:
         return dict_serialize(self.as_dict())
@@ -56,31 +57,28 @@ class AsDict:
         return self.__str__()
 
 
-class AppSettings(AsDict):
+class RunParams(AsDict):
     def __init__(self, data: DParams):
-        tests_dir = data.get('tests_dir', Path.cwd())
-        tests_dir = Path(tests_dir) if tests_dir else Path.cwd()
-        data_dir = data.get('data_dir')
-        data_dir = data_dir if data_dir else self.__resolve_data_dir(tests_dir)
-        artifacts = data.get('artifacts')
-        artifacts = Path(artifacts) if artifacts else _make_artifacts_dir()
+        tests = data.get('tests_dir', Path.cwd())
+        tests = Path(tests) if tests else Path.cwd()
+        ws = data.get('ws')
+        ws = Path(ws) if ws else Path(tempfile.mkdtemp(prefix=APP_NAME + "-"))
         executable = data.get('executable')
         executable = Path(executable) if executable else None
         self.raw = {
             'executable': executable,
-            'tests_dir': tests_dir,
-            'data_dir': Path(data_dir),
-            'artifacts': Path(artifacts),
-            'timeout': int(data.get('timeout', 10)),
-            'valgrind': to_boolean(data.get('valgrind', False)),
-            'devel_mode': to_boolean(data.get('devel_mode', True)),
+            'tests_dir': tests,
+            'ws': ws,
+            'timeout': data.get('timeout', 10),
+            'valgrind': to_bool(data.get('valgrind', False)),
+            'devel_mode': to_bool(data.get('devel_mode', True)),
         }
 
     # paths
     @property
     def executable(self) -> Optional[Path]:
-        exec = self.get('executable')
-        return Path(exec) if exec else None
+        exe = self.get('executable')
+        return Path(exe).resolve() if exe else None
 
     @property
     def tests_dir(self) -> Path:
@@ -88,15 +86,16 @@ class AppSettings(AsDict):
 
     @property
     def data_dir(self) -> Path:
-        data_files = self.raw.get('data_dir')
-        if data_files:
-            return Path(data_files)
-
-        return self.tests_dir
+        data_files = self.get('data_dir')
+        t = self.tests_dir
+        if not data_files:
+            data_dir = t / 'data'
+            self.raw['data_dir'] = data_dir if data_dir.exists() else t
+        return self.raw.get('data_dir')
 
     @property
-    def artifacts(self) -> Path:
-        return self.raw.get('artifacts')
+    def ws(self) -> Path:
+        return self.raw.get('ws')
 
     # Runtime config
     @property
@@ -105,11 +104,11 @@ class AppSettings(AsDict):
 
     @property
     def valgrind(self) -> bool:
-        return to_boolean(self.get('valgrind', False))
+        return to_bool(self.get('valgrind', False))
 
     @property
     def devel_mode(self) -> bool:
-        return to_boolean(self.get('devel_mode', False))
+        return to_bool(self.get('devel_mode', False))
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.raw.get(key, default)
@@ -117,47 +116,23 @@ class AppSettings(AsDict):
     def __getitem__(self, key: str) -> Any:
         return self.get(key)
 
-    def merge(self, other: Union[Mapping, 'AppSettings'], override: bool = True) -> 'AppSettings':
+    def merge(self, other: Union[Mapping, 'RunParams'], override: bool = True) -> 'RunParams':
         if not other:
             return self
-        data = other.raw if isinstance(other, AppSettings) else other
+        data = other.raw if isinstance(other, RunParams) else other
         new_data = copy.deepcopy(self.raw)
         for key, val in data.items():
             if key in new_data and not override:
                 continue
             new_data[key] = val
 
-        return AppSettings(new_data)
-
-    def __resolve_data_dir(self, tests_dir: Path) -> Path:
-        if (tests_dir / 'data').exists():
-            return tests_dir / 'data'
-
-        return tests_dir
+        return RunParams(new_data)
 
     def as_dict(self, params: Dict = None) -> Dict:
-        return self.raw
-
-
-class EntityMetadata(AsDict):
-    def __init__(self, name: str, desc: str = None) -> None:
-        normalized = normalize_string(name, sep='_')
-        self.id: str = normalized
-        self.name: str = normalized
-        self.original_name: str = name
-        self.desc: str = desc if desc is not None else name
+        return dict_serialize(self.raw)
 
 
 class EntityNamespace:
-    @classmethod
-    def make(cls, *parts) -> 'EntityNamespace':
-        nm = EntityNamespace(parent=None, current=parts[0])
-        for part in parts[1:]:
-            if part is None:
-                break
-            nm.make_child(part)
-        return nm
-
     def __init__(self, parent: Optional['EntityNamespace'], current: str):
         self.parent: Optional['EntityNamespace'] = parent or None
         self.current = current
@@ -168,9 +143,6 @@ class EntityNamespace:
             return [self.current]
         return [*self.parent.parts, self.current]
 
-    def make_child(self, child: str) -> 'EntityNamespace':
-        return EntityNamespace(self, child)
-
     def str(self, sep='/') -> str:
         return sep.join(self.parts)
 
@@ -178,105 +150,110 @@ class EntityNamespace:
         return self.str()
 
 
-EntityDefType = TypeVar('EntityDefType', bound='_EntityDef')
+EntityDfType = TypeVar('EntityDfType', bound='_EntityDf')
 
 
-class _EntityDef(AsDict):
-    def __init__(self, metadata: 'EntityMetadata', settings: DParams,
-                 parent: EntityDefType = None) -> None:
-        self.metadata: 'EntityMetadata' = metadata
-        self.settings: DParams = settings if settings is not None else {}
-        self._parent = parent
+class _EntityDf(AsDict):
+    def __init__(self, kind: str, name: str, desc: str, params: DParams,
+                 parent: Optional[EntityDfType]) -> None:
+        self.kind = kind
+        self.id: str = normalize_string(name, sep='_')
+        self.name: str = name
+        self.desc: str = desc if desc is not None else name
+        self.params: DParams = params or {}
+        self._parent: Optional[EntityDfType] = parent
         self._namespace = None
 
     @property
-    def parent(self) -> 'EntityDefType':
+    def parent(self) -> 'EntityDfType':
         return self._parent
 
     @parent.setter
-    def parent(self, value: 'EntityDefType'):
+    def parent(self, value: 'EntityDfType'):
         self._parent = value
+        self._namespace = None
 
     @property
-    def name(self) -> str:
-        return self.metadata.name
-
-    @property
-    def id(self) -> str:
-        return self.metadata.id
-
-    @property
-    def namespace(self) -> 'EntityNamespace':
+    def nm(self) -> 'EntityNamespace':
         if self._namespace is None:
-            if self.parent:
-                self._namespace = self.parent.namespace.make_child(self.id)
-            else:
-                self._namespace = EntityNamespace.make(self.id)
+            parent = self.parent.nm if self.parent else None
+            self._namespace = EntityNamespace(parent, self.id)
         return self._namespace
 
     def as_dict(self, params: Dict = None) -> Dict[str, Any]:
-        return self.metadata.as_dict({
-            'namespace': self.namespace,
-            **params,
+        params = params if params else {}
+        return dict_serialize({
+            'kind': self.kind,
+            'id': self.id,
+            'name': self.name,
+            'desc': self.desc,
+            'nm': self.nm.str(),
+            'params': self.params,
+            **params
         })
 
 
-class ProjectDef(_EntityDef):
-    def __init__(self, metadata: 'EntityMetadata', settings: DParams = None):
-        super().__init__(metadata, settings=settings)
-        self.suites: List['SuiteDef'] = []
+class ProjectDf(_EntityDf):
+    def __init__(self, name: str, desc: str, params: DParams = None):
+        super().__init__('project', name, desc, params, parent=None)
+        self._suites: List['SuiteDf'] = []
 
-    def add_suite(self, *suite: 'SuiteDef') -> None:
+    @property
+    def suites(self) -> List['SuiteDf']:
+        return self._suites
+
+    def add_suite(self, *suite: 'SuiteDf') -> None:
         for st in suite:
             st.parent = self
             self.suites.append(st)
 
     def as_dict(self, params: Dict = None) -> Dict:
-        return super(ProjectDef, self).as_dict({'suites': self.suites})
+        return super(ProjectDf, self).as_dict({'suites': self.suites})
 
 
-class SuiteDef(_EntityDef):
-    def __init__(self, metadata: 'EntityMetadata', settings: DParams = None):
-        super().__init__(metadata, settings=settings)
-        self.tests: List['TestDef'] = []
+class SuiteDf(_EntityDf):
+    def __init__(self, name: str, desc: str,
+                 params: DParams = None, parent: Optional[EntityDfType] = None):
+        super().__init__('suite', name, desc, params, parent)
+        self.tests: List['TestDf'] = []
 
     @property
-    def project(self) -> Optional['ProjectDef']:
+    def project(self) -> Optional['ProjectDf']:
         return self.parent
 
-    def add_test(self, *test: 'TestDef') -> None:
+    def add_test(self, *test: 'TestDf') -> None:
         for tst in test:
             tst.parent = self
             self.tests.append(tst)
 
     def as_dict(self, params: Dict = None) -> Dict:
-        return super(SuiteDef, self).as_dict({'tests': self.tests})
+        return super(SuiteDf, self).as_dict({'tests': self.tests})
 
 
-class TestDef(_EntityDef):
-    def __init__(self, metadata: 'EntityMetadata', settings: DParams = None,
-                 action: 'ActionDef' = None):
-        super().__init__(metadata, settings=settings)
-        self._preconditions: List['ActionDef'] = []
-        self._validations: List['ActionDef'] = []
-        self._action: 'ActionDef' = None
+class TestDf(_EntityDf):
+    def __init__(self, name: str, desc: str, params: DParams = None,
+                 action: 'ActionDf' = None, parent: Optional[EntityDfType] = None):
+        super().__init__('test', name, desc, params, parent)
+        self._preconditions: List['ActionDf'] = []
+        self._validations: List['ActionDf'] = []
+        self._action: Optional['ActionDf'] = None
         self.action = action
 
     @property
-    def suite(self) -> Optional[SuiteDef]:
+    def suite(self) -> Optional[SuiteDf]:
         return self.parent
 
     @property
-    def action(self) -> 'ActionDef':
+    def action(self) -> 'ActionDf':
         return self._action
 
     @action.setter
-    def action(self, act: 'ActionDef'):
+    def action(self, act: 'ActionDf'):
         act.parent = self
         self._action = act
 
     @property
-    def preconditions(self) -> List['ActionDef']:
+    def preconditions(self) -> List['ActionDf']:
         return self._preconditions
 
     def add_precondition(self, *preconditions):
@@ -285,39 +262,29 @@ class TestDef(_EntityDef):
             self._preconditions.append(pc)
 
     @property
-    def validations(self) -> List['ActionDef']:
-        return self._preconditions
+    def validations(self) -> List['ActionDf']:
+        return self._validations
 
     def add_validation(self, *validations):
         for vld in validations:
             vld.parent = self
-            self._validations.append(vld)
+            self.validations.append(vld)
 
     def as_dict(self, params: Dict = None) -> Dict:
-        return super(TestDef, self).as_dict({
+        return super(TestDf, self).as_dict({
             'preconditions': self.preconditions,
             'action': self.action,
             'validations': self.validations,
         })
 
 
-class ActionDef(_EntityDef):
-    def __init__(self, metadata: 'EntityMetadata', settings: DParams):
-        super().__init__(metadata, settings)
+class ActionDf(_EntityDf):
+    def __init__(self, name: str, desc: str, params: DParams = None, parent: Optional[EntityDfType] = None):
+        super().__init__('action', name, desc, params, parent)
 
     @property
-    def test(self) -> 'TestDef':
+    def test(self) -> 'TestDf':
         return self.parent
-
-    @property
-    def params(self) -> 'DParams':
-        return self.settings
-
-    def as_dict(self, params: Dict = None) -> Dict:
-        return {
-            'metadata': self.metadata,
-            'params': self.params
-        }
 
 
 ##
@@ -341,6 +308,12 @@ class ResultKind(enum.Enum):
     def is_ok(self) -> bool:
         return self.is_fail() or self.is_pass()
 
+    def __str__(self) -> str:
+        return self.value.upper()
+
+    def __repr__(self) -> str:
+        return str(self)
+
 
 RunResultType = TypeVar('RunResultType', bound='_RunResultBase')
 
@@ -363,23 +336,14 @@ class _RunResultBase(AsDict):
     def is_ok(self) -> bool:
         return self.kind.is_ok()
 
-    def set(self, kind: ResultKind, msg: str, detail: Any = None):
-        self.kind = kind
-        self.msg = msg
-        self.detail = detail
-
-    def update(self, kind: ResultKind, msg: str, detail: Any = None):
-        if kind.is_fail():
-            self.set(kind, msg, detail)
-
 
 class RunResult(_RunResultBase):
     def __init__(self, kind: 'ResultKind' = ResultKind.PASS,
                  msg: str = 'OK', detail: DParams = None,
-                 df: 'EntityDefType' = None):
+                 df: 'EntityDfType' = None):
         super().__init__(kind, msg, detail)
         self.preconditions: List['ActionResult'] = []
-        self.df: EntityDefType = df
+        self.df: EntityDfType = df
         self.sub_results: List['RunResultType'] = []
 
     def add_result(self, res: 'RunResultType') -> None:
@@ -416,22 +380,12 @@ class RunResult(_RunResultBase):
 
 
 class ProjectResult(RunResult):
-    def __init__(self, kind: 'ResultKind' = ResultKind.PASS,
-                 msg: str = None, detail: DParams = None,
-                 df: 'EntityDefType' = None):
-        super().__init__(kind, msg, detail, df)
-
     @property
     def suites(self) -> List['SuiteResult']:
         return self.sub_results
 
 
 class SuiteResult(RunResult):
-    def __init__(self, kind: 'ResultKind' = ResultKind.PASS,
-                 msg: str = None, detail: DParams = None,
-                 df: 'EntityDefType' = None):
-        super().__init__(kind, msg, detail, df)
-
     @property
     def tests(self) -> List['TestResult']:
         return self.sub_results
@@ -440,7 +394,7 @@ class SuiteResult(RunResult):
 class TestResult(RunResult):
     def __init__(self, kind: 'ResultKind' = ResultKind.PASS, msg: str = None,
                  detail: DParams = None,
-                 df: 'EntityDefType' = None):
+                 df: 'EntityDfType' = None):
         super().__init__(kind, msg, detail=detail, df=df)
         self.main_action: Optional['ActionResult'] = None
         self.cmd_res: Optional['CommandResult'] = None
@@ -455,19 +409,19 @@ class TestResult(RunResult):
 
 
 class ActionResult(_RunResultBase):
-    def __init__(self, kind: 'ResultKind', msg: str, detail: Any = None, df: 'ActionDef' = None):
+    def __init__(self, kind: 'ResultKind', msg: str, detail: Any = None, df: 'ActionDf' = None):
         super().__init__(kind, msg, detail)
-        self.df = df
+        self.df: 'ActionDf' = df
 
     @classmethod
-    def make_fail(cls, msg: str, df: 'ActionDef', detail: Any = None):
+    def make_fail(cls, msg: str, df: 'ActionDf', detail: Any = None):
         return ActionResult(kind=ResultKind.FAIL, msg=msg, df=df, detail=detail)
 
     @classmethod
-    def make_pass(cls, msg: str, df: 'ActionDef', detail: Any = None):
+    def make_pass(cls, msg: str, df: 'ActionDf', detail: Any = None):
         return ActionResult(kind=ResultKind.PASS, msg=msg, df=df, detail=detail)
 
-    def fail_msg(self, fill: str = ""):
+    def fail_msg(self, fill: str = "") -> str:
         result = ""
         if self.msg:
             result += f"{fill}Message: {self.msg}\n"
@@ -483,10 +437,10 @@ class ActionResult(_RunResultBase):
 
 class CommandResult(AsDict):
     def __init__(self, exit_code: int, stdout: Path, stderr: Path, elapsed: int):
-        self.exit = exit_code
-        self.stdout = stdout
-        self.stderr = stderr
-        self.elapsed = elapsed
+        self.exit: int = exit_code
+        self.stdout: Path = stdout
+        self.stderr: Path = stderr
+        self.elapsed: int = elapsed
 
     def as_dict(self, params: Dict = None) -> Dict:
         return {
@@ -499,58 +453,52 @@ class CommandResult(AsDict):
 
 class RunCtx:
     @classmethod
-    def make_new(cls, df: 'EntityDefType', settings: AppSettings, parent=None) -> 'RunCtx':
-        new_settings = settings.merge(df.settings, override=True)
-        return cls(df=df, settings=new_settings, parent=parent)
+    def make_new(cls, df: 'EntityDfType', params: RunParams, parent=None) -> 'RunCtx':
+        run_params = params.merge(df.params, override=True)
+        return cls(df=df, params=run_params, parent=parent)
 
     @classmethod
-    def from_parent(cls, parent: 'RunCtx', df: 'EntityDefType'):
-        return cls.make_new(df, parent.settings, parent=parent)
+    def from_parent(cls, parent: 'RunCtx', df: 'EntityDfType'):
+        return cls.make_new(df, parent.params, parent=parent)
 
-    def __init__(self, df: 'EntityDefType', settings: AppSettings = None, parent: 'RunCtx' = None):
+    def __init__(self, df: 'EntityDfType', params: RunParams, parent: Optional['RunCtx'] = None):
         """Creates instance of the Runtime context
-        This  is not indended to be called directly
+        This is not intended to be called directly
         please use `for_*` class methods
-        :param df:
-        :param settings:
+        :param df: Definition
+        :param params:
         """
         self._df = df
-        self.settings: 'AppSettings' = settings
-        self.parent = parent
+        self.params: RunParams = params
+        self.parent: Optional['RunCtx'] = parent
 
     @property
-    def project_df(self) -> Optional['ProjectDef']:
-        if isinstance(self.df, ProjectDef):
+    def project_df(self) -> Optional['ProjectDf']:
+        if isinstance(self.df, ProjectDf):
             return self.df
-        if self.suite_df:
-            return self.suite_df.project
-        return None
+        return self.suite_df.project if self.suite_df else None
 
     @property
-    def suite_df(self) -> Optional['SuiteDef']:
-        if isinstance(self.df, SuiteDef):
+    def suite_df(self) -> Optional['SuiteDf']:
+        if isinstance(self.df, SuiteDf):
             return self.df
-        if self.test_df:
-            return self.test_df.suite
-        return None
+        return self.test_df.suite if self.test_df else None
 
     @property
-    def test_df(self) -> Optional['TestDef']:
-        if isinstance(self.df, TestDef):
-            return self.df
-        return None
+    def test_df(self) -> Optional['TestDf']:
+        return self.df if isinstance(self.df, TestDf) else None
 
     @property
-    def df(self) -> 'EntityDefType':
+    def df(self) -> 'EntityDfType':
         return self._df
 
     @property
-    def artifacts_dir(self) -> Path:
-        return Path(self.settings.artifacts)
+    def ws_root_dir(self) -> Path:
+        return Path(self.params.ws)
 
     @property
-    def namespace(self) -> 'EntityNamespace':
-        return self.df.namespace
+    def nm(self) -> 'EntityNamespace':
+        return self.df.nm
 
     def ws(self, ensure: bool = False) -> Path:
         if self.suite_df:
@@ -558,7 +506,7 @@ class RunCtx:
         return self.project_ws(ensure)
 
     def project_ws(self, ensure: bool = False) -> Path:
-        path = self.artifacts_dir / self.project_df.name
+        path = self.ws_root_dir / self.project_df.name
         if ensure and not path.exists():
             path.mkdir(parents=True)
         return path
@@ -581,49 +529,49 @@ class RunCtx:
 
 
 class ProjectRunner:
-    def __init__(self, app_settings: 'AppSettings', project: ProjectDef):
-        self.app_settings = app_settings
+    def __init__(self, app_params: 'RunParams', project: ProjectDf):
+        self.run_params = app_params
         self.project_df = project
 
     def run(self) -> 'ProjectResult':
-        ctx = RunCtx.make_new(self.project_df, settings=self.app_settings)
-        LOG.info(f"[RUN] Project: {ctx.namespace}")
+        ctx = RunCtx.make_new(self.project_df, params=self.run_params)
+        LOG.info(f"[RUN] Project: {ctx.nm}")
         result = ctx.make_result()
 
         for suite in self.project_df.suites:
             suite_runner = SuiteRunner(suite=suite, project_ctx=ctx)
             suite_res = suite_runner.run()
-            LOG.debug(f"[RUN] Suite {ctx.namespace} result: {suite_res}")
+            LOG.debug(f"[RUN] Suite {ctx.nm} result: {suite_res}")
             result.add_result(suite_res)
 
         return result
 
 
 class SuiteRunner:
-    def __init__(self, project_ctx: 'RunCtx', suite: 'SuiteDef'):
+    def __init__(self, project_ctx: 'RunCtx', suite: 'SuiteDf'):
         self.suite_df = suite
         self.project_ctx = project_ctx
 
     def run(self) -> 'SuiteResult':
         ctx = RunCtx.from_parent(self.project_ctx, self.suite_df)
-        LOG.info(f"[RUN] Suite: {ctx.namespace}")
+        LOG.info(f"[RUN] Suite: {ctx.nm}")
         result = ctx.make_result()
         for test in self.suite_df.tests:
             test_runner = TestRunner(ctx, test)
             test_result = test_runner.run()
-            LOG.debug(f"[RUN] Test {ctx.namespace} result: {test_result}")
+            LOG.debug(f"[RUN] Test {ctx.nm} result: {test_result}")
             result.add_result(test_result)
         return result
 
 
 class TestRunner:
-    def __init__(self, suite_ctx: 'RunCtx', test: 'TestDef'):
+    def __init__(self, suite_ctx: 'RunCtx', test: 'TestDf'):
         self.suite_ctx = suite_ctx
         self.test_df = test
 
     def run(self) -> 'TestResult':
         ctx = RunCtx.from_parent(self.suite_ctx, self.test_df)
-        LOG.info(f"[RUN] Test: {ctx.namespace}")
+        LOG.info(f"[RUN] Test: {ctx.nm}")
         result: TestResult = ctx.make_result()
 
         for pre in self.test_df.preconditions:
@@ -631,7 +579,7 @@ class TestRunner:
             result.add_precondition(pc_res)
 
         if result.is_fail():
-            LOG.warning(f"[RUN] Preconditions for df {ctx.namespace} has failed")
+            LOG.warning(f"[RUN] Preconditions for df {ctx.nm} has failed")
             return result
 
         main_result = _run_action(ctx, self.test_df.action, None)
@@ -645,7 +593,7 @@ class TestRunner:
         return result
 
 
-def _run_action(ctx: 'RunCtx', action_df: 'ActionDef', cmd_res=None) -> 'ActionResult':
+def _run_action(ctx: 'RunCtx', action_df: 'ActionDf', cmd_res=None) -> 'ActionResult':
     # TODO: Register - DI
     register = ActionsRegister.instance()
     action = register.get(action_df.name)
@@ -656,7 +604,7 @@ def _run_action(ctx: 'RunCtx', action_df: 'ActionDef', cmd_res=None) -> 'ActionR
         return action(ctx, action_df, cmd_res=cmd_res).invoke()
     except Exception as ex:
         LOG.error(f"ERROR: Action execution error: {ex}")
-        if ctx.settings.get('devel_mode', False):
+        if ctx.params.get('devel_mode', False):
             raise ex
         return ActionResult.make_fail("ERROR: Action execution error", df=action_df,
                                       detail={'error': ex})
@@ -673,11 +621,10 @@ class GeneralAction:
     NAME = 'nop'
 
     @classmethod
-    def _make_df(cls, params: DParams, desc: str = None) -> 'ActionDef':
-        metadata = EntityMetadata(name=cls.NAME, desc=desc)
-        return ActionDef(metadata, params)
+    def _make_df(cls, params: DParams, desc: str = None) -> 'ActionDf':
+        return ActionDf(name=cls.NAME, desc=desc, params=params)
 
-    def __init__(self, ctx: 'RunCtx', action_df: 'ActionDef',
+    def __init__(self, ctx: 'RunCtx', action_df: 'ActionDf',
                  cmd_res: Optional['CommandResult'] = None):
         self.ctx = ctx
         self.df = action_df
@@ -694,7 +641,7 @@ class GeneralAction:
         if result is None:
             result = self._make_skip("No result provided, skipping action")
         _log = LOG.debug if result.is_ok() else LOG.warning
-        _log(f"[ACTION] Result for {self.ctx.namespace} {self.NAME}: {result}")
+        _log(f"[ACTION] Result for {self.ctx.nm} {self.NAME}: {result}")
         return result
 
     def _run(self) -> 'ActionResult':
@@ -723,13 +670,13 @@ class ExecAction(GeneralAction):
     - env(Dict): Optional environment variables
     - stdin(Path|str|dict): Standard input
     
-    Settings:
+    params:
     - executable: Executable to be executed
     - timeout: Executable runtime timeout
     """
 
     @classmethod
-    def make_df(cls, args: List[str], stdin: Union[Dict, str, Path], env: DParams) -> 'ActionDef':
+    def make_df(cls, args: List[str], stdin: Union[Dict, str, Path], env: DParams) -> 'ActionDf':
         return cls._make_df({'args': args, 'stdin': stdin, 'env': env}, desc="Execute command")
 
     def _run(self) -> 'ActionResult':
@@ -747,7 +694,7 @@ class ExecAction(GeneralAction):
             nm=self.ctx.test_df.id,
             env=env,
             cwd=ws,
-            timeout=self.ctx.settings.get('timemout', 5),
+            timeout=self.ctx.params.get('timeout', 5),
             **stdin,
         )
 
@@ -758,7 +705,7 @@ class ExecAction(GeneralAction):
         return params_env
 
     def _get_executable(self) -> str:
-        return self.ctx.settings.get('executable')
+        return self.ctx.params.get('executable')
 
     def _get_args(self) -> List[str]:
         return self.params.get('args', [])
@@ -789,7 +736,7 @@ class FileValidation(GeneralAction):
     """
 
     @classmethod
-    def make_df(cls, expected: Union[Dict, str, Path], selector: str) -> ActionDef:
+    def make_df(cls, expected: Union[Dict, str, Path], selector: str) -> ActionDf:
         return cls._make_df({
             'expected': expected,
             'selector': selector,
@@ -832,7 +779,7 @@ class FileValidation(GeneralAction):
             'diff',
             args=['-u', str(exp), str(provided)],
             ws=self.ctx.ws(),
-            nm=f"diff-{self.ctx.namespace.current}"
+            nm=f"diff-{self.ctx.nm.current}"
         )
         return self._make_result(
             diff_exec.exit == 0,
@@ -870,7 +817,7 @@ class ExitCodeValidation(GeneralAction):
     """
 
     @classmethod
-    def make_df(cls, expected: int) -> ActionDef:
+    def make_df(cls, expected: int) -> ActionDf:
         return cls._make_df({
             'expected': expected,
         }, desc=f"EXIT_CODE: {expected}")
@@ -918,30 +865,28 @@ class ActionsRegister:
 ##
 
 class DirectoryTestsParser:
-    NAME = 'directory'
+    NAME = 'dir'
 
-    def __init__(self, settings: AppSettings, multilevel: bool = False):
-        self.settings: AppSettings = settings
-        self.multilevel: bool = multilevel
+    def __init__(self, params: RunParams):
+        self.params: RunParams = params
+        self.log = LOG
 
     @property
     def folder(self) -> Path:
-        return self.settings.tests_dir
+        return self.params.tests_dir
 
-    def parse(self) -> Optional['ProjectDef']:
+    def parse(self) -> Optional['ProjectDf']:
         if not self.folder.exists():
-            LOG.error(f"[PARSE] Specified folder not found: {self.folder}")
+            self.log.error(f"[PARSE] Specified folder not found: {self.folder}")
             return None
-        LOG.info(f"[PARSE] Project [{self.folder.name}] in folder: {self.folder}")
-        project_metadata = EntityMetadata(name=self.folder.name)
-        project = ProjectDef(project_metadata)
+        self.log.info(f"[PARSE] Project [{self.folder.name}] in folder: {self.folder}")
+        project = ProjectDf(name=self.folder.name, desc=f'Project {self.folder.name}')
         project.add_suite(*self._gather_suites())
         return project
 
-    def _gather_suites(self) -> List['SuiteDef']:
-        if not self.multilevel:
-            return [self._parse_suite(self.folder)]
-        result = []
+    def _gather_suites(self) -> List['SuiteDf']:
+        root_suite = self._parse_suite(self.folder)
+        result = [root_suite] if root_suite.tests else []
         for sub in self.folder.glob("*/"):
             if self._should_exclude(sub):
                 continue
@@ -954,13 +899,13 @@ class DirectoryTestsParser:
         name = sub.name
         return not sub.is_dir() or name.startswith('.') or name.startswith('_')
 
-    def _parse_suite(self, folder: Path) -> 'SuiteDef':
-        LOG.info(f"[PARSE] Suite [{folder.name}] in folder: {folder}")
-        suite = SuiteDef(EntityMetadata(name=folder.name))
+    def _parse_suite(self, folder: Path) -> 'SuiteDf':
+        self.log.info(f"[PARSE] Suite [{folder.name}] in folder: {folder}")
+        suite = SuiteDf(name=folder.name, desc=f'Suite {folder.name} for {folder}')
         suite.add_test(*self._gather_tests(folder))
         return suite
 
-    def _gather_tests(self, folder: Path) -> List[TestDef]:
+    def _gather_tests(self, folder: Path) -> List[TestDf]:
         names = self._gather_test_names(folder)
         tests = []
         for name in names:
@@ -969,14 +914,13 @@ class DirectoryTestsParser:
         return tests
 
     def _parse_test(self, folder: Path, name: str):
-        LOG.info(f"[PARSE] Test [{name}]")
-        metadata = EntityMetadata(name=name)
+        self.log.info(f"[PARSE] Test [{name}]")
         action = ExecAction.make_df(
             args=_parse_args(_resolve_file(folder, name, ext='args', default=None)),
             stdin=_resolve_file(folder, name, ext='in'),
             env=_parse_env(_resolve_file(folder, name, ext='env', default=None))
         )
-        test = TestDef(metadata, action=action)
+        test = TestDf(name=name, desc=f"Test {name}", action=action)
         validations = self._parse_validations(folder, name)
         test.add_validation(*validations)
         return test
@@ -993,7 +937,7 @@ class DirectoryTestsParser:
                 _resolve_file(folder, name, 'err', {'empty': True}),
                 selector='@stderr',
             ),
-            # EXIT CODE (MAIN'original RETURN VALUE)
+            # EXIT CODE (the main original RETURN VALUE)
             ExitCodeValidation.make_df(_parse_exit(_resolve_file(folder, name, 'exit'), 0)),
         ]
 
@@ -1001,9 +945,9 @@ class DirectoryTestsParser:
         for fm in files_map:
             exp_path = folder / fm['expected']
             if not exp_path.exists():
-                LOG.warning(f"[PARSE] File mapping - {exp_path} does not exists!")
+                self.log.warning(f"[PARSE] File mapping - {exp_path} does not exists!")
                 continue
-            LOG.debug(f"[PARSE] Validation files mapping: {fm}")
+            self.log.debug(f"[PARSE] Validation files mapping: {fm}")
             validations.append(
                 FileValidation.make_df(expected=exp_path, selector=fm['provided'])
             )
@@ -1011,45 +955,30 @@ class DirectoryTestsParser:
 
     def _gather_test_names(self, folder: Path) -> Set[str]:
         names = set()
-        for fpath in folder.glob("*.*"):
-            if fpath.suffix in FILE_EXTENSIONS:
-                names.add(fpath.stem)
-            if fpath.suffix in ['.exp', '.expected']:
+        for pth in folder.glob("*.*"):
+            if pth.suffix in FILE_EXTENSIONS:
+                names.add(pth.stem)
+            if pth.suffix in ['.exp', '.expected']:
                 # handle expected file - in format <TEST_NAME>.<OUTPUT_FILE>.exp
-                parts = fpath.stem.split(".")
+                parts = pth.stem.split(".")
                 if len(parts) > 1:
                     names.add(parts[0])
+        self.log.debug(f"Found tests: {names}")
         return names
 
 
-class SingleDirectoryTestsParser(DirectoryTestsParser):
-    NAME = "dir"
-
-    def __init__(self, settings: AppSettings):
-        super().__init__(settings, multilevel=False)
-
-
-class MultiLevelDirectoryTestsParser(DirectoryTestsParser):
-    """Multilevel directory parser
-    """
-    NAME = "multi_level_dir"
-
-    def __init__(self, settings: AppSettings):
-        super().__init__(settings, multilevel=True)
-
-
-class MiniHwParser(MultiLevelDirectoryTestsParser):
+class MiniHwParser(DirectoryTestsParser):
     NAME = "mini"
 
     def _should_exclude(self, sub: Path):
         return not sub.is_dir() or not sub.name.lower().startswith("task")
 
-    def _parse_suite(self, folder: Path) -> 'SuiteDef':
+    def _parse_suite(self, folder: Path) -> 'SuiteDf':
         suite = super(MiniHwParser, self)._parse_suite(folder)
-        task_name = suite.metadata.original_name
-        target = self.settings.get('target', 'solution')
+        task_name = suite.name
+        target = self.params.get('target', 'solution')
         task_build_dir = self.folder / 'build' / task_name / f"{task_name}-{target}"
-        suite.settings['executable'] = task_build_dir
+        suite.params['executable'] = task_build_dir
         return suite
 
 
@@ -1057,11 +986,12 @@ class MiniHwParser(MultiLevelDirectoryTestsParser):
 # UTILITIES
 ##
 
-def dict_as_dict(obj, params=None) -> Dict:
-    data = obj.__dict__
-    if not params:
-        return data
-    return {**data, **params}
+def obj_as_dict(obj, pred: Callable[[str, Any], bool] = None) -> Dict[str, Any]:
+    params = {}
+    for name, val in inspect.getmembers(obj):
+        if pred and pred(name, val):
+            params[name] = val
+    return params
 
 
 def dict_serialize(obj, as_dict_skip: bool = False) -> Any:
@@ -1109,17 +1039,12 @@ def _resolve_file(folder: Path, name: str, ext: str, default: Any = None) -> Opt
     return default
 
 
-def _parse_args(file: Optional[Path]) -> List[str]:
-    args = []
-    if file:
-        args = list(file.read_text(encoding='utf-8').splitlines(keepends=False))
-    return args
+def _parse_args(f: Optional[Path]) -> List[str]:
+    return list(f.read_text('utf-8').splitlines(keepends=False)) if f else []
 
 
-def _parse_exit(file: Optional[Path], default: int = 0) -> int:
-    if not file:
-        return default
-    return int(file.read_text(encoding="utf-8").strip())
+def _parse_exit(f: Optional[Path], default: int = 0) -> int:
+    return int(f.read_text("utf-8")) if f else default
 
 
 def _parse_files_map(file: Optional[Path]) -> List[Dict[str, str]]:
@@ -1139,11 +1064,11 @@ def _parse_files_map(file: Optional[Path]) -> List[Dict[str, str]]:
 def _parse_env(file: Optional[Path]) -> DParams:
     if not file:
         return {}
-    envre = re.compile(r'''^([^\s=]+)=(?:[\s"']*)(.+?)(?:[\s"']*)$''')
+    env_re = re.compile(r'''^([^\s=]+)=[\s"']*(.+?)[\s"']*$''')
     result = {}
     with file.open('r') as fd:
         for line in fd:
-            match = envre.match(line)
+            match = env_re.match(line)
             if match is not None:
                 result[match.group(1)] = match.group(2)
     return result
@@ -1197,12 +1122,14 @@ def execute_cmd(cmd: str, args: List[str], ws: Path, stdin: Optional[Path] = Non
 SAFE_CHARS = string.digits + string.ascii_letters + '_!-.@'
 
 
-def normalize_string(original: str, sep: str = '_') -> str:
+def normalize_string(original: str, sep: str = '_', max_len: int = 0) -> str:
     spaces_removed = sep.join(original.split())
-    return "".join([c for c in spaces_removed if c in SAFE_CHARS])
+    res = "".join([c for c in spaces_removed if c in SAFE_CHARS])
+    max_len = 0 if max_len is None or max_len <= 0 else max_len
+    return res[:max(max_len, len(res))] if max_len > 0 else res
 
 
-def to_boolean(val: Any) -> bool:
+def to_bool(val: Any) -> bool:
     if val is None:
         return False
 
@@ -1210,10 +1137,6 @@ def to_boolean(val: Any) -> bool:
         return val.lower() in ('y', 'on', 'yes', 'enable')
 
     return bool(val)
-
-
-def _make_artifacts_dir() -> Path:
-    return Path(tempfile.mkdtemp(prefix=APP_NAME + "-"))
 
 
 ##
@@ -1245,7 +1168,7 @@ def _clr(name: str, bright: bool = False):
     return f'{prefix}{mode}{_clr_index(name)}m'
 
 
-class tcolors:
+class TColors:
     BLUE = '\033[34m'
     CYAN = _clr('cyan')
     GREEN = _clr('green')
@@ -1277,31 +1200,31 @@ class tcolors:
         return f"{color_prefix}{s}{self.ENDC}"
 
 
-def print_project_df(pdf: 'ProjectDef', colors: bool = True):
-    tc = tcolors(colors)
-    print(f"Project: [{tc.wrap(tc.GREEN, pdf.name)}] :: {pdf.metadata.desc}")
+def print_project_df(pdf: 'ProjectDf', colors: bool = True):
+    tc = TColors(colors)
+    print(f"Project: [{tc.wrap(tc.GREEN, pdf.id)}] :: {pdf.desc}")
     for sdf in pdf.suites:
-        print(f"\tSuite: [{tc.wrap(tc.GREEN, sdf.name)}]", f":: {sdf.metadata.desc}")
+        print(f"\tSuite: [{tc.wrap(tc.GREEN, sdf.id)}]", f":: {sdf.desc}")
         for test in sdf.tests:
-            print(f"\t- Test: [{tc.wrap(tc.CYAN, test.name)}] :: {test.metadata.desc} "
+            print(f"\t- Test: [{tc.wrap(tc.CYAN, test.id)}] :: {test.desc} "
                   f"(Actions: {len(test.validations)})")
             for action in test.validations:
                 print(
-                    f"\t\t * Action: [{tc.wrap(tc.MAGENTA, action.name)}] : {action.metadata.desc}"
+                    f"\t\t * Action: [{tc.wrap(tc.MAGENTA, action.id)}] : {action.desc}"
                 )
         print()
 
 
-def print_suite_result(p_res: 'ProjectResult', with_actions: bool = False,
-                       colors: bool = True):
-    tc = tcolors(colors)
+def print_project_result(p_res: 'ProjectResult', with_actions: bool = False,
+                         colors: bool = True):
+    tc = TColors(colors)
 
     def _prk(r: 'RunResultType'):
         color = tc.RED if r.kind.is_fail() else tc.GREEN
         return tc.wrap(color, f"[{r.kind.value.upper()}]")
 
     def _p(r: 'RunResultType', t: str):
-        p = f"{_prk(r)} {t.capitalize()}: ({r.df.metadata.name}) :: {r.df.metadata.desc}"
+        p = f"{_prk(r)} {t.capitalize()}: ({r.df.name}) :: {r.df.desc}"
         if isinstance(r, RunResult):
             p += f" (All: {r.n_subs}; Failed: {r.n_failed}; " \
                  f"Passed: {r.n_passed}; Skipped: {r.n_skipped})"
@@ -1334,21 +1257,21 @@ def print_suite_result(p_res: 'ProjectResult', with_actions: bool = False,
     print(f"\nOVERALL RESULT: {_prk(p_res)}\n")
 
 
-def dump_junit_report(p_res: 'ProjectResult', artifacts: Path) -> Optional[Path]:
+def dump_junit_report(p_res: 'ProjectResult', ws_root: Path) -> Optional[Path]:
     try:
         import junitparser
     except ImportError:
         LOG.warning("No JUNIT generated - junit parser is not installed")
         return None
-    report_path = artifacts / 'junit_report.xml'
+    report_path = ws_root / p_res.df.id / 'junit_report.xml'
     LOG.info(f"[REPORT] Generating JUNIT report: {report_path}")
     junit_suites = junitparser.JUnitXml(p_res.df.name)
     for s_res in p_res.suites:
         unit_suite = junitparser.TestSuite(name=s_res.df.name)
         for test_res in s_res.tests:
             junit_case = junitparser.TestCase(
-                name=test_res.df.metadata.desc,
-                classname=p_res.df.name + '/' + s_res.df.name,
+                name=test_res.df.desc,
+                classname=p_res.df.id + '/' + s_res.df.id,
                 time=test_res.cmd_res.elapsed / 1000000.0 if test_res.cmd_res else 0
             )
             unit_suite.add_testcase(junit_case)
@@ -1386,8 +1309,8 @@ def cli_exec(args):
     result = runner.run()
     with_actions = args.with_actions
     colors = not args.no_color
-    print_suite_result(result, with_actions=with_actions, colors=colors)
-    report = dump_junit_report(result, artifacts=cfg.artifacts)
+    print_project_result(result, with_actions=with_actions, colors=colors)
+    report = dump_junit_report(result, ws_root=cfg.ws)
     if report:
         print(f"JUNIT REPORT: {report}")
 
@@ -1409,8 +1332,8 @@ def make_cli_parser() -> argparse.ArgumentParser:
                          default=None)
         sub.add_argument('--multi-level', action='store_true',
                          help="Whether tests dir contains additional folders")
-        sub.add_argument('-A', '--artifacts', type=str,
-                         help='Location of the testing outputs/artifacts',
+        sub.add_argument('-W', '--workspace', type=str,
+                         help='Location of the testing workspace - outputs/artifacts',
                          default=None)
         sub.add_argument('-p', '--parser', type=str,
                          help='Use specific parser (minihw|directory)',
@@ -1438,51 +1361,52 @@ def make_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main():
+def main() -> int:
     parser = make_cli_parser()
     args = parser.parse_args()
-    _load_logger(args.log_level)
+    load_logger(args.log_level)
     if not args.func:
         parser.print_help()
         return 0
     if not args.func(args):
         print("\nExecution failed!")
-        sys.exit(1)
+        return 1
+    print("Execution succeeded")
+    return 0
 
 
-def _app_get_cfg(args) -> 'AppSettings':
+def _app_get_cfg(args) -> 'RunParams':
     app_cfg = dict(
         tests_dir=args.tests,
         data_dir=args.data,
         executable=args.executable,
-        artifacts=args.artifacts
+        ws=args.workspace
     )
 
-    settings = AppSettings(app_cfg)
+    params = RunParams(app_cfg)
 
-    LOG.debug(f"[PATHS] Executable: {settings.executable}")
-    LOG.debug(f"[PATHS] Test dir: {settings.tests_dir}")
-    LOG.debug(f"[PATHS] Test raw dir: {settings.data_dir}")
-    LOG.debug(f"[PATHS] Artifacts: {settings.artifacts}")
-    return settings
+    LOG.debug(f"[PATHS] Executable: {params.executable}")
+    LOG.debug(f"[PATHS] Test dir: {params.tests_dir}")
+    LOG.debug(f"[PATHS] Test data dir: {params.data_dir}")
+    LOG.debug(f"[PATHS] Workspace: {params.ws}")
+    return params
 
 
-def _app_parse_project(cfg: AppSettings, args) -> Optional[ProjectDef]:
+def _app_parse_project(cfg: RunParams, args) -> Optional[ProjectDf]:
     if not cfg.tests_dir.exists():
         LOG.error("Tests files directory does not exists")
         return None
     # Extract to registry
     parsers = {
         'minihw': MiniHwParser,
-        'directory': SingleDirectoryTestsParser,
-        'multi_dir': MultiLevelDirectoryTestsParser,
+        'dir': DirectoryTestsParser,
     }
     parser = parsers.get(args.parser, DirectoryTestsParser)
     parser_instance = parser(cfg)
     return parser_instance.parse()
 
 
-def _load_logger(level: str = 'INFO'):
+def load_logger(level: str = 'INFO'):
     level = level.upper()
     log_config = {
         'version': 1,
@@ -1491,7 +1415,7 @@ def _load_logger(level: str = 'INFO'):
             'verbose': {
                 'format': '%(levelname)s %(asctime)s %(module)s %(message)s'
             },
-            'simple': {
+            'single': {
                 'format': '%(levelname)s %(message)s'
             },
         },
@@ -1499,7 +1423,7 @@ def _load_logger(level: str = 'INFO'):
             'console': {
                 'level': 'DEBUG',
                 'class': 'logging.StreamHandler',
-                'formatter': 'simple'
+                'formatter': 'single'
             },
         },
         'loggers': {
@@ -1514,4 +1438,4 @@ def _load_logger(level: str = 'INFO'):
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
