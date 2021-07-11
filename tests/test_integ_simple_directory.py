@@ -30,7 +30,8 @@ def test_directory_struct(run_params):
 
     suite = project.suites[0]
     assert suite.id == 'single'
-    assert len(suite.tests) == 3
+    pysett.print_project_df(project)
+    assert len(suite.tests) == 4
     hello_test = suite.find_test('hello')
     assert hello_test.id == 'hello'
     assert hello_test.name == 'hello'

@@ -18,6 +18,7 @@ int main(int argc, char **argv) {
             if(i != 2) putchar(' ');
             printf("%s", argv[i]);
         }
+        putchar('\n');
         return 0;
     }
 
