@@ -207,6 +207,12 @@ class ProjectDf(_EntityDf):
             st.parent = self
             self.suites.append(st)
 
+    def find_suite(self, sel: str) -> Optional['SuiteDf']:
+        for t in self.suites:
+            if t.id == sel or t.name == sel:
+                return t
+        return None
+
     def as_dict(self, params: Dict = None) -> Dict:
         return super(ProjectDf, self).as_dict({'suites': self.suites})
 
@@ -225,6 +231,12 @@ class SuiteDf(_EntityDf):
         for tst in test:
             tst.parent = self
             self.tests.append(tst)
+
+    def find_test(self, sel: str) -> Optional['TestDf']:
+        for t in self.tests:
+            if t.id == sel or t.name == sel:
+                return t
+        return None
 
     def as_dict(self, params: Dict = None) -> Dict:
         return super(SuiteDf, self).as_dict({'tests': self.tests})
@@ -1242,7 +1254,7 @@ def print_project_result(p_res: 'ProjectResult', with_actions: bool = False,
             for pc in t_res.preconditions:
                 if not pc.is_ok() or with_actions:
                     print(f"{pad} {_p(pc, 'Pre-condition')}")
-            if t_res.is_fail() or with_actions:
+            if t_res.main_action.is_fail() or with_actions:
                 print(f"{pad} {_p(t_res.main_action, 'Main')}")
             for act_res in t_res.actions:
                 if not act_res.is_ok() or with_actions:

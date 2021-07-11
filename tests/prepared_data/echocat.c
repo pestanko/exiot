@@ -9,7 +9,9 @@ int main(int argc, char **argv) {
         return 0;
     }
     if(strcmp(argv[1], "exit") == 0) {
-        return atoi(argv[2]);
+        int rc = 0;
+        sscanf(argv[2], "%d", &rc);
+        return rc;
     }
     if(strcmp(argv[1], "echo") == 0) {
         for(int i = 2; i < argc; i++) {

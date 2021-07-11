@@ -30,12 +30,12 @@ def test_directory_struct(run_params):
 
     suite = project.suites[0]
     assert suite.id == 'single'
-    assert len(suite.tests) == 1
-    test = suite.tests[0]
-    assert test.id == 'hello'
-    assert test.name == 'hello'
+    assert len(suite.tests) == 3
+    hello_test = suite.find_test('hello')
+    assert hello_test.id == 'hello'
+    assert hello_test.name == 'hello'
 
-    assert len(test.validations) == 3
+    assert len(hello_test.validations) == 3
 
 
 def test_directory_run(run_params):
