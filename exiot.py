@@ -22,7 +22,7 @@ from typing import Any, Dict, Optional, List, Union, Set, TypeVar, Type, Mapping
 
 PYTHON_REQUIRED = "3.7"
 APP_NAME = "exiot"
-APP_VERSION = "0.0.1-alpha1"
+APP_VERSION = "0.0.1-alpha.1"
 APP_DESC = """
 Executable I/O Testing Tool (exiot)
 
@@ -950,7 +950,7 @@ class DirectoryTestsParser:
         for sub in self.folder.glob("*/"):
             if self._should_exclude(sub):
                 continue
-            suite = self._parse_suite(self.folder / sub)
+            suite = self._parse_suite(sub)
             if suite.tests:
                 result.append(suite)
         return result
@@ -1015,6 +1015,7 @@ class DirectoryTestsParser:
 
     def _gather_test_names(self, folder: Path) -> Set[str]:
         names = set()
+        LOG.debug(f"Gathering tests in: {folder}")
         for pth in folder.glob("*.*"):
             if pth.suffix in FILE_EXTENSIONS:
                 names.add(pth.stem)
