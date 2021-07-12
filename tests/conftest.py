@@ -3,13 +3,13 @@ from pathlib import Path
 
 import pytest
 
-import pysett
+import exiot
 from .prepenv import build_echocat
 
 
 @pytest.fixture(autouse=True)
 def _enable_logging():
-    pysett.load_logger(os.getenv('TEST_LOG_LEVEL', 'debug'))
+    exiot.load_logger(os.getenv('TEST_LOG_LEVEL', 'debug'))
 
 
 @pytest.fixture(scope="session")

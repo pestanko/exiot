@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest as pytest
 
-import pysett
-from pysett import RunParams
+import exiot
+from exiot import RunParams
 from .prepenv import PREP_DATA_PATH
 
 PREP_DATA_SINGLE_PATH = PREP_DATA_PATH / 'single_fail'
@@ -19,21 +19,21 @@ def run_params(tmp_path_factory, echocat_exe: Path) -> RunParams:
 
 
 @pytest.fixture(scope='module')
-def fail_run(run_params) -> pysett.ProjectResult:
-    parser = pysett.DirectoryTestsParser(run_params)
+def fail_run(run_params) -> exiot.ProjectResult:
+    parser = exiot.DirectoryTestsParser(run_params)
     project = parser.parse()
 
-    result = pysett.ProjectRunner(run_params, project).run()
-    pysett.print_project_result(result, verbose_size=1000)
+    result = exiot.ProjectRunner(run_params, project).run()
+    exiot.print_project_result(result, verbose_size=1000)
     return result
 
 
-def test_fail_dir_run_full(run_params, fail_run: pysett.ProjectResult):
+def test_fail_dir_run_full(run_params, fail_run: exiot.ProjectResult):
     assert fail_run.is_fail()
     assert len(fail_run.suites) == 1
 
 
-def test_fail_exit_mismatch(run_params, fail_run: pysett.ProjectResult):
+def test_fail_exit_mismatch(run_params, fail_run: exiot.ProjectResult):
     suite = fail_run.suites[0]
     assert suite.is_fail()
     test = suite.find_test('mismatch_exit')
@@ -46,7 +46,7 @@ def test_fail_exit_mismatch(run_params, fail_run: pysett.ProjectResult):
     assert test.n_failed == 1
 
 
-def test_fail_out_mismatch(run_params, fail_run: pysett.ProjectResult):
+def test_fail_out_mismatch(run_params, fail_run: exiot.ProjectResult):
     suite = fail_run.suites[0]
     assert suite.is_fail()
     test = suite.find_test('mismatch_out')
@@ -59,7 +59,7 @@ def test_fail_out_mismatch(run_params, fail_run: pysett.ProjectResult):
     assert test.n_failed == 1
 
 
-def test_fail_err_mismatch(run_params, fail_run: pysett.ProjectResult):
+def test_fail_err_mismatch(run_params, fail_run: exiot.ProjectResult):
     suite = fail_run.suites[0]
     assert suite.is_fail()
     test = suite.find_test('mismatch_out')
@@ -72,7 +72,7 @@ def test_fail_err_mismatch(run_params, fail_run: pysett.ProjectResult):
     assert test.n_failed == 1
 
 
-def test_fail_unknown(run_params, fail_run: pysett.ProjectResult):
+def test_fail_unknown(run_params, fail_run: exiot.ProjectResult):
     suite = fail_run.suites[0]
     assert suite.is_fail()
     test = suite.find_test('unknown')

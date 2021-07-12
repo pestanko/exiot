@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest as pytest
 
-import pysett
-from pysett import RunParams
+import exiot
+from exiot import RunParams
 from .prepenv import PREP_DATA_PATH
 
 PREP_DATA_SINGLE_PATH = PREP_DATA_PATH / 'single'
@@ -19,7 +19,7 @@ def run_params(tmp_path_factory, echocat_exe: Path) -> RunParams:
 
 
 def test_directory_struct(run_params):
-    parser = pysett.DirectoryTestsParser(run_params)
+    parser = exiot.DirectoryTestsParser(run_params)
     project = parser.parse()
     assert project
     assert project.parent is None
@@ -30,7 +30,7 @@ def test_directory_struct(run_params):
 
     suite = project.suites[0]
     assert suite.id == 'single'
-    pysett.print_project_df(project)
+    exiot.print_project_df(project)
     assert len(suite.tests) == 6
     hello_test = suite.find_test('hello')
     assert hello_test.id == 'hello'
@@ -40,9 +40,9 @@ def test_directory_struct(run_params):
 
 
 def test_directory_run(run_params):
-    parser = pysett.DirectoryTestsParser(run_params)
+    parser = exiot.DirectoryTestsParser(run_params)
     project = parser.parse()
 
-    result = pysett.ProjectRunner(run_params, project).run()
-    pysett.print_project_result(result)
+    result = exiot.ProjectRunner(run_params, project).run()
+    exiot.print_project_result(result)
     assert result.is_pass()

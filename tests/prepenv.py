@@ -4,7 +4,7 @@ from typing import Optional
 
 import pytest
 
-import pysett
+import exiot
 
 PREP_DATA_PATH = Path(__file__).parent / 'prepared_data'
 ECHO_CAT_PATH = PREP_DATA_PATH / 'echocat.c'
