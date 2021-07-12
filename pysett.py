@@ -34,6 +34,19 @@ FILE_EXTENSIONS = ('.in', '.out', '.err', '.files', '.args', '.exit')
 
 DParams = Dict[str, Any]
 
+# Logging specific
+
+TRACE = 5
+logging.addLevelName(TRACE, 'TRACE')
+
+
+def log_trace(self, msg, *args, **kwargs):
+    if self.isEnabledFor(TRACE):
+        self._log(TRACE, msg, args, **kwargs)
+
+
+logging.Logger.trace = log_trace
+
 
 ##
 # Definitions
@@ -291,7 +304,8 @@ class TestDf(_EntityDf):
 
 
 class ActionDf(_EntityDf):
-    def __init__(self, name: str, desc: str, params: DParams = None, parent: Optional[EntityDfType] = None):
+    def __init__(self, name: str, desc: str, params: DParams = None,
+                 parent: Optional[EntityDfType] = None):
         super().__init__('action', name, desc, params, parent)
 
     @property
@@ -396,11 +410,23 @@ class ProjectResult(RunResult):
     def suites(self) -> List['SuiteResult']:
         return self.sub_results
 
+    def find_suite(self, sel: str) -> Optional['SuiteResult']:
+        for item in self.suites:
+            if item.df.id == self or item.df.name == sel:
+                return item
+        return None
+
 
 class SuiteResult(RunResult):
     @property
     def tests(self) -> List['TestResult']:
         return self.sub_results
+
+    def find_test(self, sel: str) -> Optional['TestResult']:
+        for tr in self.tests:
+            if tr.df.id == self or tr.df.name == sel:
+                return tr
+        return None
 
 
 class TestResult(RunResult):
@@ -421,7 +447,8 @@ class TestResult(RunResult):
 
 
 class ActionResult(_RunResultBase):
-    def __init__(self, kind: 'ResultKind', msg: str, detail: Any = None, df: 'ActionDf' = None):
+    def __init__(self, kind: 'ResultKind', msg: str, detail: Any = None,
+                 df: 'ActionDf' = None):
         super().__init__(kind, msg, detail)
         self.df: 'ActionDf' = df
 
@@ -443,8 +470,13 @@ class ActionResult(_RunResultBase):
 
         if isinstance(self.detail, dict):
             for k, v in self.detail.items():
-                result += f"{fill}{k}: {v}\n"
+                if not k.startswith('_'):
+                    result += f"{fill}{k}: {v}\n"
         return result
+
+    def verbose(self, size: int = 0) -> Optional[str]:
+        verb_func = self.detail.get('_verbose')
+        return verb_func(size) if verb_func else None
 
 
 class CommandResult(AsDict):
@@ -647,13 +679,14 @@ class GeneralAction:
         return self.df.params
 
     def invoke(self) -> 'ActionResult':
-        LOG.info(f"[RUN] Executing action {self.df.name}")
-        LOG.debug(f"[RUN] Action {self.df.name} with params: {self.params}")
+        LOG.info(f"[RUN] Executing action '{self.df.name}'")
+        LOG.debug(f"[RUN] Action '{self.df.name}' with params: {self.params}")
         result = self._run()
         if result is None:
             result = self._make_skip("No result provided, skipping action")
         _log = LOG.debug if result.is_ok() else LOG.warning
-        _log(f"[ACTION] Result for {self.ctx.nm} {self.NAME}: {result}")
+        _log(f"[ACT] Action Result [{result.kind}] for '{self.ctx.nm}::{self.NAME}'")
+        LOG.trace(f"-> Result info: %s", result)
         return result
 
     def _run(self) -> 'ActionResult':
@@ -699,16 +732,23 @@ class ExecAction(GeneralAction):
         stdin = self._get_stdin_dict()
         env = self._get_env()
         ws = self.ctx.ws(ensure=True)
-        cmd_res = execute_cmd(
-            exe,
-            args=args,
-            ws=ws,
-            nm=self.ctx.test_df.id,
-            env=env,
-            cwd=ws,
-            timeout=self.ctx.params.get('timeout', 5),
-            **stdin,
-        )
+
+        try:
+            cmd_res = execute_cmd(
+                exe,
+                args=args,
+                ws=ws,
+                nm=self.ctx.test_df.id,
+                env=env,
+                cwd=ws,
+                timeout=self.ctx.params.get('timeout', 5),
+                **stdin,
+            )
+        except FileNotFoundError as ex:
+            return self._make_fail(f"Command not found '{exe}': {ex}", detail=ex)
+
+        except Exception as ex:
+            return self._make_fail(f"Command failed '{exe}': {ex}", detail=ex)
 
         return self._make_pass("Command executed", detail=cmd_res)
 
@@ -784,6 +824,9 @@ class FileValidation(GeneralAction):
             'expected': size,
             'provided': provided_size,
             'provided_file': provided,
+            '_verbose': lambda size: "--- PROVIDED CONTENT ---\n{}\n--- END CONTENT ---\n".format(
+                provided.open('r').read(size)
+            )
         })
 
     def _compare_file_content(self, provided: Path, exp: Path) -> 'ActionResult':
@@ -802,6 +845,8 @@ class FileValidation(GeneralAction):
                 'diff': str(diff_exec.stdout),
                 'diff_exit': diff_exec.exit,
                 'additional': diff_exec.as_dict(),
+                '_verbose': lambda size: '--- DIFF ---\n{}--- END DIFF---\n'.format(
+                    diff_exec.stdout.open('r').read(size))
             }
         )
 
@@ -891,7 +936,7 @@ class DirectoryTestsParser:
         if not self.folder.exists():
             self.log.error(f"[PARSE] Specified folder not found: {self.folder}")
             return None
-        self.log.info(f"[PARSE] Project [{self.folder.name}] in folder: {self.folder}")
+        self.log.info(f"[PARSE] Project '{self.folder.name}' in folder: {self.folder}")
         project = ProjectDf(name=self.folder.name, desc=f'Project {self.folder.name}')
         project.add_suite(*self._gather_suites())
         return project
@@ -912,7 +957,7 @@ class DirectoryTestsParser:
         return not sub.is_dir() or name.startswith('.') or name.startswith('_')
 
     def _parse_suite(self, folder: Path) -> 'SuiteDf':
-        self.log.info(f"[PARSE] Suite [{folder.name}] in folder: {folder}")
+        self.log.info(f"[PARSE] Suite '{folder.name}' in folder: {folder}")
         suite = SuiteDf(name=folder.name, desc=f'Suite {folder.name} for {folder}')
         suite.add_test(*self._gather_tests(folder))
         return suite
@@ -926,7 +971,7 @@ class DirectoryTestsParser:
         return tests
 
     def _parse_test(self, folder: Path, name: str):
-        self.log.info(f"[PARSE] Test [{name}]")
+        self.log.info(f"[PARSE] Test '{name}'")
         action = ExecAction.make_df(
             args=_parse_args(_resolve_file(folder, name, ext='args', default=None)),
             stdin=_resolve_file(folder, name, ext='in'),
@@ -1092,9 +1137,9 @@ def execute_cmd(cmd: str, args: List[str], ws: Path, stdin: Optional[Path] = Non
                 env: Dict[str, Any] = None, cwd: Union[str, Path] = None,
                 **kwargs) -> 'CommandResult':
     log = log or LOG
-    log.info(f"[CMD]: {cmd} with args {args}")
-    log.debug(f"[CMD]: {cmd} with stdin {stdin}")
-    log.debug(f"[CMD]: {cmd} with timeout {timeout}, cwd: {cwd}")
+    log.info(f"[CMD] Exec: '{cmd}' with args {args}")
+    log.debug(f" -> [CMD] Exec STDIN: %s", stdin if stdin else "EMPTY")
+    log.trace(f" -> [CMD] Exec with timeout {timeout}, cwd: {cwd}")
     nm = nm or cmd
     stdout = stdout or ws / f'{nm}.stdout'
     stderr = stderr or ws / f'{nm}.stderr'
@@ -1104,24 +1149,30 @@ def execute_cmd(cmd: str, args: List[str], ws: Path, stdin: Optional[Path] = Non
     with stdout.open('w') as fd_out, stderr.open('w') as fd_err:
         fd_in = Path(stdin).open('r') if stdin else None
         start_time = time.perf_counter_ns()
-        exec_result = subprocess.run(
-            [cmd, *args],
-            stdout=fd_out,
-            stderr=fd_err,
-            stdin=fd_in,
-            timeout=timeout,
-            env=full_env,
-            cwd=str(cwd) if cwd else None,
-            **kwargs
-        )
-        if fd_in:
-            fd_in.close()
-    end_time = time.perf_counter_ns()
-    log.info(f"[CMD] Result: {exec_result}")
-    log.debug(f" -> Command stdout {stdout}")
-    log.debug(f"STDOUT: {stdout.read_bytes()}")
-    log.debug(f" -> Command stderr {stderr}")
-    log.debug(f"STDERR: {stderr.read_bytes()}")
+        try:
+            exec_result = subprocess.run(
+                [cmd, *args],
+                stdout=fd_out,
+                stderr=fd_err,
+                stdin=fd_in,
+                timeout=timeout,
+                env=full_env,
+                cwd=str(cwd) if cwd else None,
+                **kwargs
+            )
+        except Exception as ex:
+            log.error(f"[CMD] Execution '{cmd}' failed: {ex}")
+            raise ex
+        finally:
+            end_time = time.perf_counter_ns()
+            if fd_in:
+                fd_in.close()
+
+    log.debug(f"[CMD] Result[exit={exec_result.returncode}]: {exec_result}")
+    log.trace(f" -> Command stdout {stdout}")
+    log.trace(f"STDOUT: {stdout.read_bytes()}")
+    log.trace(f" -> Command stderr {stderr}")
+    log.trace(f"STDERR: {stderr.read_bytes()}")
 
     return CommandResult(
         exit_code=exec_result.returncode,
@@ -1228,7 +1279,7 @@ def print_project_df(pdf: 'ProjectDf', colors: bool = True):
 
 
 def print_project_result(p_res: 'ProjectResult', with_actions: bool = False,
-                         colors: bool = True):
+                         colors: bool = True, verbose_size: int = 0):
     tc = TColors(colors)
 
     def _prk(r: 'RunResultType'):
@@ -1264,6 +1315,10 @@ def print_project_result(p_res: 'ProjectResult', with_actions: bool = False,
                     continue
 
                 print(act_res.fail_msg("\t\t  [info] "))
+                if verbose_size:
+                    vrb = act_res.verbose(verbose_size)
+                    if vrb:
+                        print(vrb)
         print()
 
     print(f"\nOVERALL RESULT: {_prk(p_res)}\n")
@@ -1397,10 +1452,9 @@ def _app_get_cfg(args) -> 'RunParams':
 
     params = RunParams(app_cfg)
 
-    LOG.debug(f"[PATHS] Executable: {params.executable}")
-    LOG.debug(f"[PATHS] Test dir: {params.tests_dir}")
-    LOG.debug(f"[PATHS] Test data dir: {params.data_dir}")
-    LOG.debug(f"[PATHS] Workspace: {params.ws}")
+    LOG.info(f"[PATHS] Executable: {params.executable}")
+    LOG.info(f"[PATHS] Test dir: {params.tests_dir}")
+    LOG.info(f"[PATHS] Workspace: {params.ws}")
     return params
 
 
@@ -1433,7 +1487,7 @@ def load_logger(level: str = 'INFO'):
         },
         'handlers': {
             'console': {
-                'level': 'DEBUG',
+                'level': 'TRACE',
                 'class': 'logging.StreamHandler',
                 'formatter': 'single'
             },

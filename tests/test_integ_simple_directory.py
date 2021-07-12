@@ -9,12 +9,12 @@ from .prepenv import PREP_DATA_PATH
 PREP_DATA_SINGLE_PATH = PREP_DATA_PATH / 'single'
 
 
-@pytest.fixture()
-def run_params(prep_ws: Path, echocat_exe: Path) -> RunParams:
+@pytest.fixture(scope='module')
+def run_params(tmp_path_factory, echocat_exe: Path) -> RunParams:
     return RunParams(dict(
         tests_dir=PREP_DATA_SINGLE_PATH,
         executable=echocat_exe,
-        ws=prep_ws,
+        ws=tmp_path_factory.mktemp('prep_ws'),
     ))
 
 
@@ -31,7 +31,7 @@ def test_directory_struct(run_params):
     suite = project.suites[0]
     assert suite.id == 'single'
     pysett.print_project_df(project)
-    assert len(suite.tests) == 4
+    assert len(suite.tests) == 6
     hello_test = suite.find_test('hello')
     assert hello_test.id == 'hello'
     assert hello_test.name == 'hello'
