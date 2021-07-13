@@ -1,4 +1,5 @@
 #! /usr/bin/env python3
+import abc
 import argparse
 import collections.abc
 import copy
@@ -8,6 +9,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import string
 import subprocess
 import sys
@@ -22,13 +24,14 @@ from typing import Any, Dict, Optional, List, Union, Set, TypeVar, Type, Mapping
 
 PYTHON_REQUIRED = "3.7"
 APP_NAME = "exiot"
-APP_VERSION = "0.0.1-alpha.1"
-APP_DESC = """
+APP_VERSION = "0.0.1-alpha.2"
+APP_DESC = f"""
 Executable I/O Testing Tool (exiot)
 
 The "exiot" is a testing tool to test the executable STDIN, STDOUT, STDERR, and many more.
 
 Tool is parsing provided test scenarios using multiple parsers.
+
 """
 
 LOG = logging.getLogger(APP_NAME)
@@ -233,10 +236,15 @@ class ProjectDf(_EntityDf):
 
 
 class SuiteDf(_EntityDf):
-    def __init__(self, name: str, desc: str,
+    def __init__(self, name: str, desc: str, stage: List[str] = None,
                  params: DParams = None, parent: Optional[EntityDfType] = None):
         super().__init__('suite', name, desc, params, parent)
+        self._stage = stage or []
         self.tests: List['TestDf'] = []
+
+    @property
+    def stage(self) -> List[str]:
+        return self._stage
 
     @property
     def project(self) -> Optional['ProjectDf']:
@@ -258,10 +266,11 @@ class SuiteDf(_EntityDf):
 
 
 class TestDf(_EntityDf):
-    def __init__(self, name: str, desc: str, params: DParams = None,
+    def __init__(self, name: str, desc: str, params: DParams = None, stage: List[str] = None,
                  action: 'ActionDf' = None, parent: Optional[EntityDfType] = None):
         super().__init__('test', name, desc, params, parent)
         self._preconditions: List['ActionDf'] = []
+        self._stage = stage or []
         self._validations: List['ActionDf'] = []
         self._action: Optional['ActionDf'] = None
         self.action = action
@@ -269,6 +278,10 @@ class TestDf(_EntityDf):
     @property
     def suite(self) -> Optional[SuiteDf]:
         return self.parent
+
+    @property
+    def stage(self) -> List[str]:
+        return self._stage
 
     @property
     def action(self) -> 'ActionDf':
@@ -294,6 +307,8 @@ class TestDf(_EntityDf):
 
     def add_validation(self, *validations):
         for vld in validations:
+            if vld is None:
+                continue
             vld.parent = self
             self.validations.append(vld)
 
@@ -573,18 +588,49 @@ class RunCtx:
             return SuiteResult(df=self.suite_df)
         return ProjectResult(df=self.project_df)
 
+    def stage_files(self, stage_patterns):
+        suite_ws = self.suite_ws(True)
+        for stage in stage_patterns:
+            files = self.data_dir.glob(stage)
+            for f in files:
+                shutil.copy2(f, suite_ws)
+
+    @property
+    def tests_dir(self) -> Path:
+        return self.params.tests_dir
+
+    @property
+    def data_dir(self) -> Path:
+        return self.params.tests_dir / self.params.get('data_subdir', '')
+
+    def resolve_data_file(self, exp: Path) -> Path:
+        if exp is None:
+            return None
+        exp = Path(exp)
+        if exp.is_absolute() and exp.exists():
+            return exp
+        if exp.exists():
+            return exp
+        data = self.data_dir / exp
+        if data.exists():
+            return data
+        data = self.tests_dir / exp
+        if data.exists():
+            return data
+        return self.data_dir / exp
+
 
 class ProjectRunner:
     def __init__(self, app_params: 'RunParams', project: ProjectDf):
         self.run_params = app_params
-        self.project_df = project
+        self.df = project
 
     def run(self) -> 'ProjectResult':
-        ctx = RunCtx.make_new(self.project_df, params=self.run_params)
+        ctx = RunCtx.make_new(self.df, params=self.run_params)
         LOG.info(f"[RUN] Project: {ctx.nm}")
         result = ctx.make_result()
 
-        for suite in self.project_df.suites:
+        for suite in self.df.suites:
             suite_runner = SuiteRunner(suite=suite, project_ctx=ctx)
             suite_res = suite_runner.run()
             LOG.debug(f"[RUN] Suite {ctx.nm} result: {suite_res}")
@@ -595,14 +641,15 @@ class ProjectRunner:
 
 class SuiteRunner:
     def __init__(self, project_ctx: 'RunCtx', suite: 'SuiteDf'):
-        self.suite_df = suite
+        self.df = suite
         self.project_ctx = project_ctx
 
     def run(self) -> 'SuiteResult':
-        ctx = RunCtx.from_parent(self.project_ctx, self.suite_df)
+        ctx = RunCtx.from_parent(self.project_ctx, self.df)
         LOG.info(f"[RUN] Suite: '{ctx.nm}'")
         result = ctx.make_result()
-        for test in self.suite_df.tests:
+        ctx.stage_files(self.df.stage)
+        for test in self.df.tests:
             test_runner = TestRunner(ctx, test)
             test_result = test_runner.run()
             LOG.debug(f"[RUN] Test '{ctx.nm}' result [{test_result.kind}]: {test_result}")
@@ -613,14 +660,15 @@ class SuiteRunner:
 class TestRunner:
     def __init__(self, suite_ctx: 'RunCtx', test: 'TestDf'):
         self.suite_ctx = suite_ctx
-        self.test_df = test
+        self.df = test
 
     def run(self) -> 'TestResult':
-        ctx = RunCtx.from_parent(self.suite_ctx, self.test_df)
+        ctx = RunCtx.from_parent(self.suite_ctx, self.df)
         LOG.info(f"[RUN] Test: {ctx.nm}")
         result: TestResult = ctx.make_result()
+        ctx.stage_files(self.df.stage)
 
-        for pre in self.test_df.preconditions:
+        for pre in self.df.preconditions:
             pc_res = _run_action(ctx, pre, cmd_res=None)
             result.add_precondition(pc_res)
 
@@ -628,7 +676,7 @@ class TestRunner:
             LOG.warning(f"[RUN] Preconditions for df {ctx.nm} has failed")
             return result
 
-        main_result = _run_action(ctx, self.test_df.action, None)
+        main_result = _run_action(ctx, self.df.action, None)
         result.main_action = main_result
         result.cmd_res = main_result.detail
         if main_result.is_fail():
@@ -636,7 +684,7 @@ class TestRunner:
             result.add_result(main_result)
             return result
 
-        for validation in self.test_df.validations:
+        for validation in self.df.validations:
             validation_res = _run_action(ctx, validation, main_result.detail)
             result.add_result(validation_res)
 
@@ -773,10 +821,10 @@ class ExecAction(GeneralAction):
         if not stdin or stdin == 'empty':
             return {'input': b''}
         if isinstance(stdin, str) or isinstance(stdin, Path):
-            return {'stdin': Path(stdin)}
+            return {'stdin': self.ctx.resolve_data_file(stdin)}
         if isinstance(stdin, dict) or isinstance(stdin, collections.abc.Mapping):
             if 'file' in stdin:
-                return {'stdin': Path(stdin['file'])}
+                return {'stdin': self.ctx.resolve_data_file(stdin['file'])}
             if 'content' in stdin:
                 content: str = stdin['content']
                 return {'input': content.encode(encoding='utf-8')}
@@ -799,6 +847,20 @@ class FileValidation(GeneralAction):
             'expected': expected,
             'selector': selector,
         }, desc=f"SELECTOR: {selector}")
+
+    @classmethod
+    def parse(cls, expected: Union[Dict, str, Path], selector: str) -> Optional['ActionDf']:
+        expected = expected if expected else {'empty': True}
+        if isinstance(expected, str):
+            if expected == 'any':
+                return None
+            elif expected == 'empty':
+                expected = {'empty': True}
+            elif expected == 'nonempty':
+                expected = {'empty': False}
+            else:
+                expected = {'file': expected}
+        return cls.make_df(expected, selector)
 
     def _run(self) -> 'ActionResult':
         provided = self._get_by_selector()
@@ -834,6 +896,7 @@ class FileValidation(GeneralAction):
         })
 
     def _compare_file_content(self, provided: Path, exp: Path) -> 'ActionResult':
+        exp = self.ctx.resolve_data_file(exp)
         diff_exec = execute_cmd(
             'diff',
             args=['-u', str(exp), str(provided)],
@@ -875,6 +938,17 @@ class ExitCodeValidation(GeneralAction):
     Params:
     - expected(int): Expected exit code, special value (any) - it will not be checked
     """
+
+    @classmethod
+    def parse(cls, code: Union['str', int]) -> Optional['ActionDf']:
+        if code is None:
+            return cls.make_df(0)
+        if isinstance(code, int):
+            return cls.make_df(code)
+        if code == 'any':
+            return None
+
+        return cls.make_df(int(code))
 
     @classmethod
     def make_df(cls, expected: int) -> ActionDf:
@@ -924,30 +998,38 @@ class ActionsRegister:
 # PARSERS
 ##
 
-class DirectoryTestsParser:
-    NAME = 'dir'
+class DefinitionParser:
+    NAME = None
 
     def __init__(self, params: RunParams):
         self.params: RunParams = params
         self.log = LOG
 
     @property
-    def folder(self) -> Path:
+    def tests_dir(self) -> Path:
         return self.params.tests_dir
 
+    @abc.abstractmethod
+    def parse(self) -> Optional[ProjectDf]:
+        return None
+
+
+class DirectoryTestsParser(DefinitionParser):
+    NAME = 'dir'
+
     def parse(self) -> Optional['ProjectDf']:
-        if not self.folder.exists():
-            self.log.error(f"[PARSE] Specified folder not found: {self.folder}")
+        if not self.tests_dir.exists():
+            self.log.error(f"[PARSE] Specified folder not found: {self.tests_dir}")
             return None
-        self.log.info(f"[PARSE] Project '{self.folder.name}' in folder: {self.folder}")
-        project = ProjectDf(name=self.folder.name, desc=f'Project {self.folder.name}')
+        self.log.info(f"[PARSE] Project '{self.tests_dir.name}' in folder: {self.tests_dir}")
+        project = ProjectDf(name=self.tests_dir.name, desc=f'Project {self.tests_dir.name}')
         project.add_suite(*self._gather_suites())
         return project
 
     def _gather_suites(self) -> List['SuiteDf']:
-        root_suite = self._parse_suite(self.folder)
+        root_suite = self._parse_suite(self.tests_dir)
         result = [root_suite] if root_suite.tests else []
-        for sub in self.folder.glob("*/"):
+        for sub in self.tests_dir.glob("*/"):
             if self._should_exclude(sub):
                 continue
             suite = self._parse_suite(sub)
@@ -998,7 +1080,7 @@ class DirectoryTestsParser:
                 selector='@stderr',
             ),
             # EXIT CODE (the main original RETURN VALUE)
-            ExitCodeValidation.make_df(_parse_exit(_resolve_file(folder, name, 'exit'), 0)),
+            ExitCodeValidation.parse(_parse_exit(_resolve_file(folder, name, 'exit'), 0)),
         ]
 
         files_map = _parse_files_map(_resolve_file(folder, name, 'files', None))
@@ -1038,9 +1120,142 @@ class MiniHwParser(DirectoryTestsParser):
         suite = super(MiniHwParser, self)._parse_suite(folder)
         task_name = suite.name
         target = self.params.get('target', 'solution')
-        task_build_dir = self.folder / 'build' / task_name / f"{task_name}-{target}"
+        task_build_dir = self.tests_dir / 'build' / task_name / f"{task_name}-{target}"
         suite.params['executable'] = task_build_dir
         return suite
+
+
+class FileScenarioDefParser(DefinitionParser):
+    NAME = 'scenario'
+
+    def parse(self) -> Optional['ProjectDf']:
+        proj_file = self._find_project_file() or {}
+        project = self._make_project(proj_file)
+        suites_prop = proj_file.get('suites', [])
+        self.parse_suite_files(project, suites_prop)
+        return project
+
+    def _make_project(self, proj_file):
+        proj_prop = proj_file.get('project', {})
+        project = ProjectDf(
+            name=proj_prop.get('name', self.tests_dir.name),
+            desc=proj_prop.get('desc'),
+            params=proj_file.get('params')
+        )
+        return project
+
+    def _find_project_file(self) -> Optional[Dict[str, Any]]:
+        files = self.tests_dir.glob('project*.*')
+        if not files:
+            return None
+        result = []
+        for pf in files:
+            parsed = load_def_file(pf)
+            if not parsed:
+                continue
+            if 'project' in parsed:
+                parsed['project_file'] = pf
+                LOG.info(f'[PARSE] Project File: "{pf}"')
+                result.append(parsed)
+        if len(result) > 1:
+            LOG.warning("There are multiple projects found - this should not happen. "
+                        f"The first one will be used: {result[0]['project_file']}")
+        return result[0] if result else None
+
+    def parse_suite_files(self, project: ProjectDf, suites_list: List[str]) -> List['SuiteDf']:
+        suite_files = self._find_suite_files(suites_list)
+        suites = []
+        for sf in suite_files:
+            LOG.info(f'[PARSE] Suite File: "{sf}"')
+            sfd = load_def_file(sf)
+            if not sfd or 'suite' not in sfd:
+                continue
+            suite = self.parse_suite(project, sfd)
+            if suite:
+                suites.append(suite)
+
+        return suites
+
+    def _find_suite_files(self, suites_list: List[str]):
+        result = []
+        for pat in suites_list:
+            files = self.tests_dir.glob(pat)
+            if files:
+                result.extend(files)
+        return result
+
+    def parse_suite(self, project: ProjectDf, sfd: Dict[str, Any]) -> 'SuiteDf':
+        LOG.debug(f'[PARSE] Suite: {sfd}')
+        suite_prop = sfd['suite']
+        stage_prop = sfd.get('data', sfd.get('stage'))
+        suite = SuiteDf(
+            name=suite_prop.get('name'),
+            desc=suite_prop.get('desc'),
+            stage=stage_prop,
+            params=sfd.get('params')
+        )
+        project.add_suite(suite)
+        tests_list = sfd.get('tests')
+        for td in tests_list:
+            self.parse_test(suite, td)
+        return suite
+
+    def parse_test(self, suite: SuiteDf, td: Dict[str, Any]):
+        params = td.get('params', {})
+        test = TestDf(
+            name=td['name'],
+            desc=td.get('desc'),
+            params=params,
+            stage=td.get('data', td.get('stage')),
+            action=self.parse_action(td)
+        )
+        vals_prop = td.get('validations', [])
+        for val in vals_prop:
+            test.add_validation(self._parse_explicit_action(val))
+        self._add_default_validations(td, test)
+        suite.add_test(test)
+
+    def _add_default_validations(self, td, test: 'TestDf'):
+        validations = [
+            FileValidation.parse(expected=td.get('out', {'empty': True}), selector='@stdout'),
+            FileValidation.parse(expected=td.get('err', {'empty': True}), selector='@stderr'),
+            ExitCodeValidation.parse(td.get('exit')),
+        ]
+        test.add_validation(
+            *validations
+        )
+        for f in td.get('files', []):
+            test.add_validation(
+                FileValidation.parse(
+                    expected=f.get('exp', f.get('expected', f.get('e'))),
+                    selector=f.get('provided', f.get('prov', f.get('p'))),
+                )
+            )
+        self.log.trace(f"[PARSE] Default Validations for '{test.nm}': {test.validations} ")
+
+    def parse_action(self, td: Dict[str, Any]) -> ActionDf:
+        act = td.get('action')
+        if act:
+            return self._parse_explicit_action(act)
+
+        return ExecAction.make_df(
+            args=td.get('args'),
+            stdin=td.get('in'),
+            env=td.get('env'),
+        )
+
+    def _parse_explicit_action(self, act):
+        self.log.debug(f"[PARSE] Action: {act}")
+        if isinstance(act, str):
+            act = {'name': act, 'desc': f'Action {act}'}
+        return ActionDf(name=act['name'], desc=act.get('desc'), params=act.get('params'))
+
+
+PARSERS = {c.NAME: c for c in [
+    MiniHwParser,
+    DirectoryTestsParser,
+    FileScenarioDefParser
+]}
 
 
 ##
@@ -1103,7 +1318,7 @@ def load_def_file(file: Path) -> Optional[Dict[str, Any]]:
     with file.open('r') as fd:
         if file.suffix == '.json':
             return json.load(fd)
-        if file.suffix == 'yaml':
+        if file.suffix in ['.yml', '.yaml']:
             try:
                 import yaml
                 return yaml.safe_load(fd)
@@ -1125,8 +1340,8 @@ def _parse_args(f: Optional[Path]) -> List[str]:
     return list(f.read_text('utf-8').splitlines(keepends=False)) if f else []
 
 
-def _parse_exit(f: Optional[Path], default: int = 0) -> int:
-    return int(f.read_text("utf-8")) if f else default
+def _parse_exit(f: Optional[Path], default: int = 0) -> str:
+    return f.read_text("utf-8") if f else default
 
 
 def _parse_files_map(file: Optional[Path]) -> List[Dict[str, str]]:
@@ -1431,6 +1646,8 @@ def cli_exec(args):
 
 
 def make_cli_parser() -> argparse.ArgumentParser:
+    parser_names = "|".join(PARSERS.keys())
+
     def _shared_options(sub):
         sub.add_argument('-E', '--executable', type=str, default=None,
                          help="Location of the executable you would like to df")
@@ -1440,7 +1657,7 @@ def make_cli_parser() -> argparse.ArgumentParser:
                          help='Location of the testing workspace - outputs/artifacts',
                          default=None)
         sub.add_argument('-p', '--parser', type=str,
-                         help='Use specific parser (minihw|directory)',
+                         help=f'Use specific parser ({parser_names})',
                          default=None)
         sub.add_argument('--no-color', action='store_true', default=False,
                          help='Print output without color')
@@ -1448,6 +1665,7 @@ def make_cli_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(APP_NAME, description=APP_DESC)
     parser.set_defaults(func=None)
+    parser.add_argument('--version', action='version', version=f'{APP_NAME}: {APP_VERSION}')
     parser.add_argument("-L", "--log-level", type=str,
                         help="Set log level (DEBUG|INFO|WARNING|ERROR)", default=None)
     subs = parser.add_subparsers(title="Available ")
@@ -1503,11 +1721,8 @@ def _app_parse_project(cfg: RunParams, args) -> Optional[ProjectDf]:
         LOG.error("Tests files directory does not exists")
         return None
     # Extract to registry
-    parsers = {
-        'minihw': MiniHwParser,
-        'dir': DirectoryTestsParser,
-    }
-    parser = parsers.get(args.parser, DirectoryTestsParser)
+
+    parser = PARSERS.get(args.parser, DirectoryTestsParser)
     parser_instance = parser(cfg)
     return parser_instance.parse()
 

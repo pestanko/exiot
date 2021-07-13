@@ -1,0 +1,6 @@
+project:
+  name: sample_project
+  desc: Sample project
+
+suites:
+  - "suite*.yml"
