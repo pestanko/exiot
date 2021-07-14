@@ -1,13 +1,14 @@
+import logging
 import subprocess
 from pathlib import Path
 from typing import Optional
-
-import pytest
 
 import exiot
 
 PREP_DATA_PATH = Path(__file__).parent / 'prepared_data'
 ECHO_CAT_PATH = PREP_DATA_PATH / 'echocat.c'
+
+TEST_LOG = logging.getLogger(exiot.APP_NAME + ".tests")
 
 
 def build_echocat(output: Path) -> Optional[Path]:
@@ -20,9 +21,14 @@ def build_echocat(output: Path) -> Optional[Path]:
 
 def _build_with_command(cmd: str, output: Path) -> Optional[Path]:
     binary = f"{output}/echocat"
-    res = subprocess.run([cmd, "-std=c99", '-g', "-o", binary, f"{ECHO_CAT_PATH}"])
-    print(res.stdout)
-    print(res.stderr)
+    args = [cmd, "-std=c99", '-g', "-o", binary, f"{ECHO_CAT_PATH}"]
+    try:
+        res = subprocess.run(args)
+    except Exception as ex:
+        TEST_LOG.warning(f"[EXE] Unable to build using '{cmd}': {ex}")
+        return None
+    TEST_LOG.debug(f"[EXE] {args} [exit={res.returncode}] STDOUT:  {res.stdout}")
+    TEST_LOG.debug(f"[EXE] {args} [exit={res.returncode}] STDERR: {res.stderr}")
     if res.returncode != 0:
         return None
     files = list(output.glob("echocat"))

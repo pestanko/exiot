@@ -588,11 +588,12 @@ class RunCtx:
             return SuiteResult(df=self.suite_df)
         return ProjectResult(df=self.project_df)
 
-    def stage_files(self, stage_patterns):
+    def stage_files(self, stage_patterns: List['str']):
         suite_ws = self.suite_ws(True)
         for stage in stage_patterns:
             files = self.data_dir.glob(stage)
             for f in files:
+                LOG.debug(f"[STAGE] File for '{self.nm}' - from '{f}' to '{suite_ws}'")
                 shutil.copy2(f, suite_ws)
 
     @property
