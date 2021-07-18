@@ -1830,17 +1830,21 @@ def make_cli_parser() -> argparse.ArgumentParser:
 def main(args: Optional[List['str']] = None) -> int:
     parser = make_cli_parser()
     args = parser.parse_args(args)
-    log_level = args.log_level
-    if not log_level:
-        log_level = os.getenv('LOG_LEVEL', 'error')
-    load_logger(log_level)
     if not args.func:
         parser.print_help()
         return 0
+
     if not args.func(args):
         print("\nExecution failed!")
         return 1
     return 0
+
+
+def _get_log_level(args):
+    log_level = args.log_level
+    if not log_level:
+        log_level = os.getenv('LOG_LEVEL', 'error')
+    return log_level
 
 
 def parse_params_defs(defn: List[str]) -> Dict[str, Any]:
@@ -1893,6 +1897,8 @@ def _app_get_cfg(args: argparse.Namespace) -> 'RunParams':
         app_cfg.update(parse_params_defs(defn))
     params = RunParams(app_cfg)
 
+    load_logger(_get_log_level(args), log_file=(params.ws / 'tests.log'))
+
     LOG.info("[PATHS] Executable: %s", params.executable)
     LOG.info("[PATHS] Test dir: %s", params.tests_dir)
     LOG.info("[PATHS] Workspace: %s", params.ws)
@@ -1910,8 +1916,9 @@ def _app_parse_project(cfg: RunParams, args) -> Optional[ProjectDf]:
     return parser_instance.parse()
 
 
-def load_logger(level: str = 'INFO'):
+def load_logger(level: str = 'INFO', log_file: Optional[Path] = None, file_level: str = None):
     level = level.upper()
+    file_level = file_level.upper() if file_level else level
     log_config = {
         'version': 1,
         'disable_existing_loggers': False,
@@ -1937,6 +1944,14 @@ def load_logger(level: str = 'INFO'):
             }
         }
     }
+    if log_file and log_file.parent.exists():
+        log_config['handlers']['file'] = {
+            'level': file_level,
+            'class': 'logging.FileHandler',
+            'formatter': 'verbose',
+            'filename': str(log_file)
+        }
+        log_config['loggers'][APP_NAME]['handlers'].append('file')
     logging.config.dictConfig(log_config)
 
 
