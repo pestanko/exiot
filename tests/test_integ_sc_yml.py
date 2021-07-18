@@ -28,6 +28,7 @@ def succ_run(run_params) -> exiot.ProjectResult:
     return result
 
 
+@pytest.mark.integ
 def test_sc_succ_run(succ_run):
     assert succ_run.is_pass()
     all_suites = len(succ_run.suites)
@@ -37,6 +38,7 @@ def test_sc_succ_run(succ_run):
     assert succ_run.n_failed == 0
 
 
+@pytest.mark.integ
 def test_sc_succ_suites_run(succ_run):
     for res_suite in succ_run.suites:
         n_tests = len(res_suite.tests)

@@ -89,19 +89,17 @@ class AsDict:
 class RunParams(AsDict):
     def __init__(self, data: DParams):
         tests = data.get('tests_dir', Path.cwd())
-        tests = Path(tests) if tests else Path.cwd()
         ws = data.get('ws')
-        ws = Path(ws) if ws else Path(tempfile.mkdtemp(prefix=APP_NAME + "-"))
         executable = data.get('executable')
-        executable = Path(executable) if executable else None
-        self.raw = {
-            'executable': executable,
-            'tests_dir': tests,
-            'ws': ws,
+        data.update({
+            'executable': Path(executable) if executable else None,
+            'tests_dir': Path(tests) if tests else Path.cwd(),
+            'ws': Path(ws) if ws else Path(tempfile.mkdtemp(prefix=APP_NAME + "-")),
             'timeout': data.get('timeout', 10),
             'valgrind': to_bool(data.get('valgrind', False)),
             'devel_mode': to_bool(data.get('devel_mode', True)),
-        }
+        })
+        self.raw = data
 
     # paths
     @property
@@ -1202,7 +1200,7 @@ class MiniHwParser(DirectoryTestsParser):
     def _parse_suite(self, folder: Path) -> 'SuiteDf':
         suite = super()._parse_suite(folder)
         task_name = suite.name
-        target = self.params.get('target', 'solution')
+        target = self.params.get('target', 'source')
         task_build_dir = self.tests_dir / 'build' / task_name / f"{task_name}-{target}"
         suite.params['executable'] = task_build_dir
         return suite
@@ -1273,7 +1271,7 @@ class FileScenarioDefParser(DefinitionParser):
         suite_prop = sfd['suite']
         stage_prop = sfd.get('data', sfd.get('stage'))
         suite = SuiteDf(
-            name=suite_prop.get('name'),
+            name=suite_prop['name'],
             desc=suite_prop.get('desc'),
             stage=stage_prop,
             params=sfd.get('params')
@@ -1337,11 +1335,21 @@ class AutoScenarioParser(DefinitionParser):
     NAME = 'auto'
 
     def parse(self) -> Optional[ProjectDf]:
+        parser = self._select()
+        return parser(self.params).parse()
+
+    def _select(self) -> Type[DefinitionParser]:
         for ext in ('yml', 'yaml', 'json'):
             glob = list(self.tests_dir.glob(f'project*.{ext}'))
             if len(glob) > 0:
-                return FileScenarioDefParser(self.params).parse()
-        return DirectoryTestsParser(self.params).parse()
+                return FileScenarioDefParser
+
+        tests = list(self.tests_dir.glob('task*'))
+        if tests:
+            if (tests[0] / 'source.c').exists():
+                return MiniHwParser
+
+        return DirectoryTestsParser
 
 
 PARSERS = {c.NAME: c for c in [
@@ -1754,7 +1762,7 @@ def dump_junit_report(p_res: 'ProjectResult', ws_root: Path,
     return report_path
 
 
-def cli_parse(args):
+def cli_parse(args: argparse.Namespace):
     cfg = _app_get_cfg(args)
     p_def = _app_parse_project(cfg, args)
     if args.output in ['json', 'j', 'yml', 'yaml', 'y']:
@@ -1764,7 +1772,7 @@ def cli_parse(args):
     return True
 
 
-def cli_exec(args):
+def cli_exec(args: argparse.Namespace):
     cfg = _app_get_cfg(args)
     project_df = _app_parse_project(cfg, args)
     runner = ProjectRunner(cfg, project=project_df)
@@ -1774,7 +1782,7 @@ def cli_exec(args):
     print_project_result(result, with_actions=with_actions, colors=colors)
     report = dump_junit_report(result, ws_root=cfg.ws)
     if report:
-        print(f"JUNIT REPORT: {report}")
+        print(f"JUNIT REPORT:", report)
 
     return result.is_pass()
 
@@ -1793,6 +1801,8 @@ def make_cli_parser() -> argparse.ArgumentParser:
         sub.add_argument('-p', '--parser', type=str,
                          help=f'Use specific parser ({parser_names}), default is "auto"',
                          default=None)
+        sub.add_argument('-D', '--define', action='append', nargs='*',
+                         help='Define/override parameter (format: \'-D "var=value"\')')
         sub.add_argument('--no-color', action='store_true', default=False,
                          help='Print output without color')
         sub.add_argument('tests', type=str, help='Test files location')
@@ -1819,9 +1829,9 @@ def make_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
+def main(args: Optional[List['str']] = None) -> int:
     parser = make_cli_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(args)
     log_level = args.log_level
     if not log_level:
         log_level = os.getenv('LOG_LEVEL', 'error')
@@ -1835,13 +1845,54 @@ def main() -> int:
     return 0
 
 
-def _app_get_cfg(args) -> 'RunParams':
+def parse_params_defs(defn: List[str]) -> Dict[str, Any]:
+    result = {}
+    for df in defn:
+        df = df.strip()
+        if not df:
+            continue
+        parts = df.split('=', maxsplit=1)
+        key = parts[0].strip()
+        val = True
+        if len(parts) == 2:
+            val = parse_param_value(parts[1])
+        result[key] = parse_param_value(val)
+    return result
+
+
+PARAM_CONVERTERS = {
+    '@int': int,
+    '@float': float,
+    '@bool': to_bool,
+    '@path': Path,
+}
+
+
+def parse_param_value(val: str) -> Any:
+    val = val.strip()
+
+    if not val.startswith('@'):
+        return val
+
+    cvt = None
+    for i in PARAM_CONVERTERS.keys():
+        if val.startswith(i):
+            cvt = PARAM_CONVERTERS[i]
+            break
+
+    return cvt(val) if cvt else val
+
+
+def _app_get_cfg(args: argparse.Namespace) -> 'RunParams':
     app_cfg = dict(
         tests_dir=args.tests,
         executable=args.executable,
         ws=args.workspace
     )
 
+    defn = args.define
+    if defn:
+        app_cfg.update(parse_params_defs(defn))
     params = RunParams(app_cfg)
 
     LOG.info("[PATHS] Executable: %s", params.executable)

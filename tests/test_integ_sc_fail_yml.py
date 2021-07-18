@@ -28,10 +28,12 @@ def fail_run(run_params) -> exiot.ProjectResult:
     return result
 
 
+@pytest.mark.integ
 def test_sc_fail_run(fail_run):
     assert fail_run.is_fail()
 
 
+@pytest.mark.integ
 def test_sc_fail_all_suites(fail_run):
     assert fail_run.n_failed == len(fail_run.suites)
     assert fail_run.n_oks == 0

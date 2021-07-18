@@ -63,6 +63,7 @@ int main(int argc, char **argv) {
     }
     if(strcmp(argv[1], "echo") == 0) {
         for(int i = 2; i < argc; i++) {
+            if(*argv[i] == '\0') continue;
             if(i != 2) putchar(' ');
             printf("%s", argv[i]);
         }
