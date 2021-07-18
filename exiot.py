@@ -1,6 +1,6 @@
 #! /usr/bin/env python3
 """
-Executable I/O Testing Tool (exiot)
+Executable I/O Testing Tool (exiot),
 
 The "exiot" is a testing tool to test the executable STDIN, STDOUT, STDERR, and many more.
 Tool is parsing provided test scenarios using multiple parsers.
@@ -37,10 +37,8 @@ APP_NAME = "exiot"
 APP_VERSION = "0.0.1-alpha.2"
 APP_DESC = f"""
 Executable I/O Testing Tool ({APP_NAME})
-
-The "exiot" is a testing tool to test the executable STDIN, STDOUT, STDERR, and many more.
+is a testing tool to test the executable STDIN, STDOUT, STDERR, and many more.
 Tool is parsing provided test scenarios using multiple parsers.
-
 """
 
 LOG = logging.getLogger(APP_NAME)
@@ -1782,7 +1780,7 @@ def cli_exec(args: argparse.Namespace):
     print_project_result(result, with_actions=with_actions, colors=colors)
     report = dump_junit_report(result, ws_root=cfg.ws)
     if report:
-        print(f"JUNIT REPORT:", report)
+        print("JUNIT REPORT:", report)
 
     return result.is_pass()
 
@@ -1875,9 +1873,9 @@ def parse_param_value(val: str) -> Any:
         return val
 
     cvt = None
-    for i in PARAM_CONVERTERS.keys():
-        if val.startswith(i):
-            cvt = PARAM_CONVERTERS[i]
+    for key, converter in PARAM_CONVERTERS.items():
+        if val.startswith(key):
+            cvt = converter
             break
 
     return cvt(val) if cvt else val

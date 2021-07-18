@@ -33,7 +33,7 @@ def _exec_cmd(args: List[str]) -> Optional[subprocess.CompletedProcess]:
     try:
         res = subprocess.run(args)
     except Exception as ex:
-        TEST_LOG.warning(f"[EXE] Unable to build using '{args[0]}': {ex}")
+        TEST_LOG.warning(f"[EXE] Unable to bld using '{args[0]}': {ex}")
         return None
     TEST_LOG.debug(f"[EXE] {args} [exit={res.returncode}] STDOUT:  {res.stdout}")
     TEST_LOG.debug(f"[EXE] {args} [exit={res.returncode}] STDERR: {res.stderr}")
@@ -42,12 +42,11 @@ def _exec_cmd(args: List[str]) -> Optional[subprocess.CompletedProcess]:
     return res
 
 
-def build_with_cmake(root: Path, build: Optional['Path'] = None) -> Optional[subprocess.CompletedProcess]:
-    build = build if build else root / 'build'
-    args = ['cmake', '-B', str(build), str(root)]
+def build_cmake(root: Path, bld: Optional['Path'] = None) -> Optional[subprocess.CompletedProcess]:
+    bld = bld if bld else root / 'build'
+    args = ['cmake', '-B', str(bld), str(root)]
     res = _exec_cmd(args)
     if res.returncode != 0:
         return res
-    res = _exec_cmd(['make', '-k', '-C', str(build)])
-    
-    return res
+
+    return _exec_cmd(['make', '-k', '-C', str(bld)])
