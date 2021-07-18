@@ -5,21 +5,32 @@ suite:
 tests:
   - name: cat single hello
     desc: "cat out the hello"
-    args: ['cat']
+    args: [ 'cat' ]
     in: data/single_hello.out
     out: data/single_hello.out
     exit: 0
 
   - name: cat hello world
     desc: "cat out the hello world"
-    args: ['cat', 'single_hello.out']
+    args: [ 'cat', 'single_hello.out' ]
     data:
       - data/single_hello.out
     out: data/single_hello.out
 
   - name: cat hello world stderr
     desc: "cat out the hello world to stderr"
-    args: ['cat', 'single_hello.out', 'stderr']
+    args: [ 'cat', 'single_hello.out', 'stderr' ]
     data:
       - data/single_hello.out
     err: data/single_hello.out
+
+  - name: cat hello world to file
+    desc: "cat out the hello world"
+    args: [ 'cat', 'single_hello.out', 'hello.txt' ]
+    data:
+      - data/single_hello.out
+    out:
+      empty: true
+    files:
+      - provided: 'hello.txt'
+        expected: 'data/single_hello.out'

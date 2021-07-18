@@ -5,8 +5,10 @@ from typing import Optional
 
 import exiot
 
-PREP_DATA_PATH = Path(__file__).parent / 'prepared_data'
-ECHO_CAT_PATH = PREP_DATA_PATH / 'echocat.c'
+PROJECT_ROOT = Path(__file__).parent.parent
+EXAMPLES_PATH = PROJECT_ROOT / 'examples'
+
+ECHO_CAT_PATH = EXAMPLES_PATH / 'echocat.c'
 
 TEST_LOG = logging.getLogger(exiot.APP_NAME + ".tests")
 

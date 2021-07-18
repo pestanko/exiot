@@ -4,9 +4,9 @@ import pytest as pytest
 
 import exiot
 from exiot import RunParams
-from .prepenv import PREP_DATA_PATH
+from .prepenv import EXAMPLES_PATH
 
-PREP_DATA_SINGLE_PATH = PREP_DATA_PATH / 'single'
+PREP_DATA_SINGLE_PATH = EXAMPLES_PATH / 'single'
 
 
 @pytest.fixture(scope='module')

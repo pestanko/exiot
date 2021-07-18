@@ -1,0 +1,21 @@
+suite:
+  name: echo
+  desc: Test "echo" sub-command
+
+tests:
+  - name: echo_single_word
+    desc: "Print out single word"
+    args: [ 'echo', 'hello' ]
+    out:
+      content: "hell"
+
+  - name: echo_hello_world_2_args
+    desc: "Print out hello world"
+    args: [ 'echo', 'hello', 'world' ]
+    out:
+      content: "hell"
+
+  - name: echo_hello_world_single
+    desc: "Print out hello world as single arg"
+    args: ['echo', 'hello world', "additional"]
+    out: data/hello_world.out

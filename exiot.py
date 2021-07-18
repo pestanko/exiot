@@ -1,4 +1,13 @@
 #! /usr/bin/env python3
+"""
+Executable I/O Testing Tool (exiot)
+
+The "exiot" is a testing tool to test the executable STDIN, STDOUT, STDERR, and many more.
+Tool is parsing provided test scenarios using multiple parsers.
+
+Authors:
+- Peter Stanko <peter.stanko0@gmail.com>
+"""
 import abc
 import argparse
 import collections.abc
@@ -7,6 +16,7 @@ import enum
 import inspect
 import json
 import logging
+import logging.config
 import os
 import re
 import shutil
@@ -26,10 +36,9 @@ PYTHON_REQUIRED = "3.7"
 APP_NAME = "exiot"
 APP_VERSION = "0.0.1-alpha.2"
 APP_DESC = f"""
-Executable I/O Testing Tool (exiot)
+Executable I/O Testing Tool ({APP_NAME})
 
 The "exiot" is a testing tool to test the executable STDIN, STDOUT, STDERR, and many more.
-
 Tool is parsing provided test scenarios using multiple parsers.
 
 """
@@ -46,8 +55,7 @@ logging.addLevelName(TRACE, 'TRACE')
 
 
 def log_trace(self, msg, *args, **kwargs):
-    if self.isEnabledFor(TRACE):
-        self._log(TRACE, msg, args, **kwargs)
+    self.log(TRACE, msg, args, **kwargs)
 
 
 logging.Logger.trace = log_trace
@@ -63,7 +71,10 @@ class AsDict:
     """
 
     def as_dict(self, params: Dict = None) -> Dict:
-        return obj_as_dict(self, lambda n, v: not callable(v) and not n.startswith("_"))
+        data = obj_as_dict(self, lambda n, v: not callable(v) and not n.startswith("_"))
+        if params:
+            data.update(params)
+        return data
 
     def d_serialize(self) -> Dict:
         return dict_serialize(self.as_dict())
@@ -101,15 +112,6 @@ class RunParams(AsDict):
     @property
     def tests_dir(self) -> Path:
         return Path(self.get('tests_dir', Path.cwd()))
-
-    @property
-    def data_dir(self) -> Path:
-        data_files = self.get('data_dir')
-        t = self.tests_dir
-        if not data_files:
-            data_dir = t / 'data'
-            self.raw['data_dir'] = data_dir if data_dir.exists() else t
-        return self.raw.get('data_dir')
 
     @property
     def ws(self) -> Path:
@@ -152,11 +154,12 @@ class RunParams(AsDict):
 
 class EntityNamespace:
     def __init__(self, parent: Optional['EntityNamespace'], current: str):
-        self.parent: Optional['EntityNamespace'] = parent or None
-        self.current = current
+        # pylint: disable=E0601
+        self.parent: Optional['EntityNamespace'] = parent
+        self.current: str = current
 
     @property
-    def parts(self) -> List['str']:
+    def parts(self) -> List[str]:
         if self.parent is None:
             return [self.current]
         return [*self.parent.parts, self.current]
@@ -172,15 +175,20 @@ EntityDfType = TypeVar('EntityDfType', bound='_EntityDf')
 
 
 class _EntityDf(AsDict):
-    def __init__(self, kind: str, name: str, desc: str, params: DParams,
+    KIND: str = None
+
+    def __init__(self, name: str, desc: str, params: DParams,
                  parent: Optional[EntityDfType]) -> None:
-        self.kind = kind
         self.id: str = normalize_string(name, sep='_')
         self.name: str = name
         self.desc: str = desc if desc is not None else name
         self.params: DParams = params or {}
         self._parent: Optional[EntityDfType] = parent
         self._namespace = None
+
+    @property
+    def kind(self) -> str:
+        return self.KIND
 
     @property
     def parent(self) -> 'EntityDfType':
@@ -212,8 +220,14 @@ class _EntityDf(AsDict):
 
 
 class ProjectDf(_EntityDf):
+    KIND = 'project'
+
+    @classmethod
+    def parse_df(cls, data: Dict[str, Any]) -> 'ProjectDf':
+        return cls(name=data['name'], desc=data.get('desc'), params=data.get('params', {}))
+
     def __init__(self, name: str, desc: str, params: DParams = None):
-        super().__init__('project', name, desc, params, parent=None)
+        super().__init__(name, desc, params, parent=None)
         self._suites: List['SuiteDf'] = []
 
     @property
@@ -221,24 +235,26 @@ class ProjectDf(_EntityDf):
         return self._suites
 
     def add_suite(self, *suite: 'SuiteDf') -> None:
-        for st in suite:
-            st.parent = self
-            self.suites.append(st)
+        for df in suite:
+            df.parent = self
+            self.suites.append(df)
 
     def find_suite(self, sel: str) -> Optional['SuiteDf']:
-        for t in self.suites:
-            if t.id == sel or t.name == sel:
-                return t
+        for suite in self.suites:
+            if sel in (suite.id, suite.name):
+                return suite
         return None
 
     def as_dict(self, params: Dict = None) -> Dict:
-        return super(ProjectDf, self).as_dict({'suites': self.suites})
+        return super().as_dict({'suites': self.suites})
 
 
 class SuiteDf(_EntityDf):
+    KIND = 'suite'
+
     def __init__(self, name: str, desc: str, stage: List[str] = None,
                  params: DParams = None, parent: Optional[EntityDfType] = None):
-        super().__init__('suite', name, desc, params, parent)
+        super().__init__(name, desc, params, parent)
         self._stage = stage or []
         self.tests: List['TestDf'] = []
 
@@ -256,19 +272,21 @@ class SuiteDf(_EntityDf):
             self.tests.append(tst)
 
     def find_test(self, sel: str) -> Optional['TestDf']:
-        for t in self.tests:
-            if t.id == sel or t.name == sel:
-                return t
+        for test in self.tests:
+            if sel in (test.id, test.name):
+                return test
         return None
 
     def as_dict(self, params: Dict = None) -> Dict:
-        return super(SuiteDf, self).as_dict({'tests': self.tests})
+        return super().as_dict({'tests': self.tests})
 
 
 class TestDf(_EntityDf):
+    KIND = 'test'
+
     def __init__(self, name: str, desc: str, params: DParams = None, stage: List[str] = None,
                  action: 'ActionDf' = None, parent: Optional[EntityDfType] = None):
-        super().__init__('test', name, desc, params, parent)
+        super().__init__(name, desc, params, parent)
         self._preconditions: List['ActionDf'] = []
         self._stage = stage or []
         self._validations: List['ActionDf'] = []
@@ -297,9 +315,9 @@ class TestDf(_EntityDf):
         return self._preconditions
 
     def add_precondition(self, *preconditions):
-        for pc in preconditions:
-            pc.parent = self
-            self._preconditions.append(pc)
+        for cond in preconditions:
+            cond.parent = self
+            self._preconditions.append(cond)
 
     @property
     def validations(self) -> List['ActionDf']:
@@ -313,7 +331,7 @@ class TestDf(_EntityDf):
             self.validations.append(vld)
 
     def as_dict(self, params: Dict = None) -> Dict:
-        return super(TestDf, self).as_dict({
+        return super().as_dict({
             'preconditions': self.preconditions,
             'action': self.action,
             'validations': self.validations,
@@ -321,9 +339,11 @@ class TestDf(_EntityDf):
 
 
 class ActionDf(_EntityDf):
-    def __init__(self, name: str, desc: str, params: DParams = None,
+    KIND = 'action'
+
+    def __init__(self, name: str, desc: str = None, params: DParams = None,
                  parent: Optional[EntityDfType] = None):
-        super().__init__('action', name, desc, params, parent)
+        super().__init__(name, desc, params, parent)
 
     @property
     def test(self) -> 'TestDf':
@@ -349,9 +369,10 @@ class ResultKind(enum.Enum):
         return self == self.SKIP
 
     def is_ok(self) -> bool:
-        return self.is_fail() or self.is_pass()
+        return self.is_skip() or self.is_pass()
 
     def __str__(self) -> str:
+        # pylint: disable=E1101
         return self.value.upper()
 
     def __repr__(self) -> str:
@@ -440,16 +461,15 @@ class SuiteResult(RunResult):
         return self.sub_results
 
     def find_test(self, sel: str) -> Optional['TestResult']:
-        for tr in self.tests:
-            if tr.df.id == self or tr.df.name == sel:
-                return tr
+        for test in self.tests:
+            if test.df.id == self or test.df.name == sel:
+                return test
         return None
 
 
 class TestResult(RunResult):
     def __init__(self, kind: 'ResultKind' = ResultKind.PASS, msg: str = None,
-                 detail: DParams = None,
-                 df: 'EntityDfType' = None):
+                 detail: DParams = None, df: 'EntityDfType' = None):
         super().__init__(kind, msg, detail=detail, df=df)
         self.main_action: Optional['ActionResult'] = None
         self.cmd_res: Optional['CommandResult'] = None
@@ -492,6 +512,8 @@ class ActionResult(_RunResultBase):
         return result
 
     def verbose(self, size: int = 0) -> Optional[str]:
+        if not self.detail:
+            return None
         verb_func = self.detail.get('_verbose')
         return verb_func(size) if verb_func else None
 
@@ -577,6 +599,7 @@ class RunCtx:
         if not self.suite_df:
             LOG.error("[WS] Suite not set - this should never happen!")
             assert self.suite_df is not None
+        path /= self.suite_df.id
         if ensure and not path.exists():
             path.mkdir(parents=True)
         return path
@@ -593,7 +616,7 @@ class RunCtx:
         for stage in stage_patterns:
             files = self.data_dir.glob(stage)
             for f in files:
-                LOG.debug(f"[STAGE] File for '{self.nm}' - from '{f}' to '{suite_ws}'")
+                LOG.debug("[STAGE] File for '%s' - from '%s' to '%s'", self.nm, f, suite_ws)
                 shutil.copy2(f, suite_ws)
 
     @property
@@ -604,7 +627,7 @@ class RunCtx:
     def data_dir(self) -> Path:
         return self.params.tests_dir / self.params.get('data_subdir', '')
 
-    def resolve_data_file(self, exp: Path) -> Path:
+    def resolve_data_file(self, exp: Path) -> Optional[Path]:
         if exp is None:
             return None
         exp = Path(exp)
@@ -628,13 +651,13 @@ class ProjectRunner:
 
     def run(self) -> 'ProjectResult':
         ctx = RunCtx.make_new(self.df, params=self.run_params)
-        LOG.info(f"[RUN] Project: {ctx.nm}")
+        LOG.info("[RUN] Project: '%s'", ctx.nm)
         result = ctx.make_result()
 
         for suite in self.df.suites:
             suite_runner = SuiteRunner(suite=suite, project_ctx=ctx)
             suite_res = suite_runner.run()
-            LOG.debug(f"[RUN] Suite {ctx.nm} result: {suite_res}")
+            LOG.debug("[RUN] Suite '%s' result: %s", ctx.nm, suite_res)
             result.add_result(suite_res)
 
         return result
@@ -647,13 +670,14 @@ class SuiteRunner:
 
     def run(self) -> 'SuiteResult':
         ctx = RunCtx.from_parent(self.project_ctx, self.df)
-        LOG.info(f"[RUN] Suite: '{ctx.nm}'")
+        LOG.info("[RUN] Suite: '%s'", ctx.nm)
         result = ctx.make_result()
         ctx.stage_files(self.df.stage)
         for test in self.df.tests:
             test_runner = TestRunner(ctx, test)
             test_result = test_runner.run()
-            LOG.debug(f"[RUN] Test '{ctx.nm}' result [{test_result.kind}]: {test_result}")
+            LOG.debug("[RUN] Test '%s' result [%s]: %s",
+                      ctx.nm, test_result.kind, test_result)
             result.add_result(test_result)
         return result
 
@@ -664,8 +688,9 @@ class TestRunner:
         self.df = test
 
     def run(self) -> 'TestResult':
+        # pylint: disable=W0201
         ctx = RunCtx.from_parent(self.suite_ctx, self.df)
-        LOG.info(f"[RUN] Test: {ctx.nm}")
+        LOG.info("[RUN] Test: '%s'", ctx.nm)
         result: TestResult = ctx.make_result()
         ctx.stage_files(self.df.stage)
 
@@ -674,7 +699,7 @@ class TestRunner:
             result.add_precondition(pc_res)
 
         if result.is_fail():
-            LOG.warning(f"[RUN] Preconditions for df {ctx.nm} has failed")
+            LOG.warning("[RUN] Preconditions for '%s' has failed", ctx.nm)
             return result
 
         main_result = _run_action(ctx, self.df.action, None)
@@ -693,16 +718,15 @@ class TestRunner:
 
 
 def _run_action(ctx: 'RunCtx', action_df: 'ActionDf', cmd_res=None) -> 'ActionResult':
-    # TODO: Register - DI
     register = ActionsRegister.instance()
-    action = register.get(action_df.name)
+    action = register.get(action_df.id)
     if not action:
-        LOG.error(f"[RUN] Unable to find action: {action_df.name}")
-        return ActionResult.make_fail(f"Unable to find action: {action_df.name}", df=action_df)
+        LOG.error("[RUN] Unable to find action: '%s'", action_df.id)
+        return ActionResult.make_fail(f"Unable to find action: {action_df.id}", df=action_df)
     try:
         return action(ctx, action_df, cmd_res=cmd_res).invoke()
     except Exception as ex:
-        LOG.error(f"ERROR: Action execution error: {ex}")
+        LOG.error("ERROR: Action '%s' execution error: %s", action_df.id, ex)
         if ctx.params.get('devel_mode', False):
             raise ex
         return ActionResult.make_fail("ERROR: Action execution error", df=action_df,
@@ -734,14 +758,15 @@ class GeneralAction:
         return self.df.params
 
     def invoke(self) -> 'ActionResult':
-        LOG.info(f"[RUN] Executing action '{self.df.name}'")
-        LOG.debug(f"[RUN] Action '{self.df.name}' with params: {self.params}")
+        LOG.info("[RUN] Executing action '%s'", self.df.name)
+        LOG.debug("[RUN] Action '%s' with params: %s", self.df.name, self.params)
         result = self._run()
         if result is None:
             result = self._make_skip("No result provided, skipping action")
         _log = LOG.debug if result.is_ok() else LOG.warning
-        _log(f"[ACT] Action Result [{result.kind}] for '{self.ctx.nm}::{self.NAME}'")
-        LOG.trace(f"-> Result info: %s", result)
+        _log("[ACT] Action Result [%s] for '%s::%s'",
+             result.kind, self.ctx.nm, self.NAME)
+        LOG.trace("-> Result info: %s", result)
         return result
 
     def _run(self) -> 'ActionResult':
@@ -765,11 +790,12 @@ class ExecAction(GeneralAction):
     NAME = 'cmd_exec'
     """Execute Command/Executable action
     Kind: cmd_exec
+
     Params:
     - args(List[str]): Command Line arguments
     - env(Dict): Optional environment variables
     - stdin(Path|str|dict): Standard input
-    
+
     params:
     - executable: Executable to be executed
     - timeout: Executable runtime timeout
@@ -782,7 +808,7 @@ class ExecAction(GeneralAction):
     def _run(self) -> 'ActionResult':
         exe = self._get_executable()
         if not exe:
-            return self._make_fail(f"Executable not set")
+            return self._make_fail("Executable not set")
         args = self._get_args()
         stdin = self._get_stdin_dict()
         env = self._get_env()
@@ -821,9 +847,9 @@ class ExecAction(GeneralAction):
         stdin = self.df.params.get('stdin')
         if not stdin or stdin == 'empty':
             return {'input': b''}
-        if isinstance(stdin, str) or isinstance(stdin, Path):
+        if isinstance(stdin, (str, Path)):
             return {'stdin': self.ctx.resolve_data_file(stdin)}
-        if isinstance(stdin, dict) or isinstance(stdin, collections.abc.Mapping):
+        if isinstance(stdin, (dict, collections.abc.Mapping)):
             if 'file' in stdin:
                 return {'stdin': self.ctx.resolve_data_file(stdin['file'])}
             if 'content' in stdin:
@@ -837,13 +863,13 @@ class FileValidation(GeneralAction):
     """Validate content of the file
     Kind: file_validation
     Params:
-    - expected(dict|str|Path): Expected file/content definition
+    - expected(dict): Expected file/content definition
     - selector(str): Select the "executable generated file" to compare against
         Special: @stdout, @stderr - standard output/error output files
     """
 
     @classmethod
-    def make_df(cls, expected: Union[Dict, str, Path], selector: str) -> ActionDf:
+    def make_df(cls, expected: Dict[str, Any], selector: str) -> ActionDf:
         return cls._make_df({
             'expected': expected,
             'selector': selector,
@@ -855,9 +881,9 @@ class FileValidation(GeneralAction):
         if isinstance(expected, str):
             if expected == 'any':
                 return None
-            elif expected == 'empty':
+            if expected == 'empty':
                 expected = {'empty': True}
-            elif expected == 'nonempty':
+            elif expected in ['nonempty', 'non-empty']:
                 expected = {'empty': False}
             else:
                 expected = {'file': expected}
@@ -865,34 +891,47 @@ class FileValidation(GeneralAction):
 
     def _run(self) -> 'ActionResult':
         provided = self._get_by_selector()
-        exp = self.params.get('expected')
-        if not exp or exp == 'empty':
-            return self._compare_file_size(provided, size=0)
-
-        if isinstance(exp, str) or isinstance(exp, Path):
-            return self._compare_file_content(provided=provided, exp=Path(exp))
-
-        if isinstance(exp, dict):
-            return self._resolve_dict(exp, provided)
-
-        return self._make_fail(f"To be implemented for: {type(exp)}")
+        exp = self.params.get('expected', {'empty': True})
+        return self._resolve_dict(exp, provided)
 
     def _resolve_dict(self, exp: Dict, provided: Path):
-        if exp.get('empty'):
-            return self._compare_file_size(provided, size=0)
-        if exp.get('size'):
-            return self._compare_file_size(provided, size=int(exp.get('size')))
-        fp = exp.get('file', exp.get('path'))
+        if exp.get('any'):
+            return self._make_pass('Not checking file content')
+
+        empty = exp.get('empty')
+        if empty is not None:
+            if empty:
+                return self._compare_file_size(provided, expr=' == 0')
+            return self._compare_file_size(provided, expr=' != 0')
+
+        size = exp.get('size')
+        if size is not None:
+            return self._compare_file_size(provided, expr=f' == {int(size)}')
+
+        match = exp.get('match')
+        if match is not None:
+            return self._match_file_content(provided, pattern=match)
+
+        content = exp.get('content')
+        if content is not None:
+            fp = self._make_expected_output(content)
+        else:
+            fp = exp.get('file', exp.get('path'))
+
         if fp:
             return self._compare_file_content(provided, exp=Path(fp))
         return None
 
-    def _compare_file_size(self, provided: Path, size: int = 0):
+    def _compare_file_size(self, provided: Path, expr: str):
         provided_size = os.path.getsize(str(provided))
-        return self._make_result(provided_size == size, msg="File size mismatch", detail={
-            'expected': size,
+        full_expr = f"{provided_size} {expr}"
+        result = safer_eval_cond(full_expr)
+
+        return self._make_result(result, msg="File size mismatch", detail={
+            'expected': full_expr,
             'provided': provided_size,
             'provided_file': provided,
+            'expr': full_expr,
             '_verbose': lambda s: _verbose_wrap('FILE CONTENT', _trunc_read(provided, s))
         })
 
@@ -931,11 +970,35 @@ class FileValidation(GeneralAction):
 
         return self.ctx.ws() / selector
 
+    def _make_expected_output(self, content: Union[str, bytes]) -> Path:
+        selector: str = self.params.get('selector')
+        selector = selector[1:] if selector.startswith('@') else selector
+        tid = self.df.test.id
+        full_name = "{}_{}.exp".format(normalize_string(tid, max_len=150),
+                                       normalize_string(selector, max_len=70))
+        pth = self.ctx.ws(True) / full_name
+        if isinstance(content, bytes):
+            pth.write_bytes(content)
+        else:
+            pth.write_text(content)
+        return pth
+
+    def _match_file_content(self, provided, pattern: str) -> 'ActionResult':
+        result = re.match(pattern, provided.read_text('utf-8'))
+        return self._make_result(
+            bool(result),
+            "File content does not match the expected pattern",
+            detail={
+                'expected': pattern,
+                'provided': str(provided),
+            }
+        )
+
 
 class ExitCodeValidation(GeneralAction):
     NAME = 'exit_validation'
     """Exit code validation to validate executable exit code
-    Name: exit_validation 
+    Name: exit_validation
     Params:
     - expected(int): Expected exit code, special value (any) - it will not be checked
     """
@@ -944,8 +1007,10 @@ class ExitCodeValidation(GeneralAction):
     def parse(cls, code: Union['str', int]) -> Optional['ActionDf']:
         if code is None:
             return cls.make_df(0)
+
         if isinstance(code, int):
             return cls.make_df(code)
+
         if code == 'any':
             return None
 
@@ -962,9 +1027,15 @@ class ExitCodeValidation(GeneralAction):
         provided = self.cmd_res.exit
         if exit_code == 'any':
             return self._make_pass("Exit code is not checked")
-        return self._make_result(provided == exit_code, msg="Exit code mismatch", detail={
+        if exit_code in ['non-zero', 'nonzero']:
+            expr = f'{provided} != 0'
+        else:
+            expr = f'{provided} == {int(exit_code)}'
+        result = safer_eval_cond(expr)
+        return self._make_result(result, msg="Exit code mismatch", detail={
             'expected': exit_code,
             'provided': provided,
+            'expr': expr
         })
 
 
@@ -991,7 +1062,7 @@ class ActionsRegister:
     def add(self, action: Type[ActionType]):
         self.register[action.NAME] = action
 
-    def get(self, kind: 'str') -> Optional[Type[ActionType]]:
+    def get(self, kind: str) -> Optional[Type[ActionType]]:
         return self.register.get(kind)
 
 
@@ -1020,9 +1091,10 @@ class DirectoryTestsParser(DefinitionParser):
 
     def parse(self) -> Optional['ProjectDf']:
         if not self.tests_dir.exists():
-            self.log.error(f"[PARSE] Specified folder not found: {self.tests_dir}")
+            self.log.error("[PARSE] Specified folder not found: '%s'", self.tests_dir)
             return None
-        self.log.info(f"[PARSE] Project '{self.tests_dir.name}' in folder: {self.tests_dir}")
+        self.log.info("[PARSE] Project '%s' in folder: '%s'",
+                      self.tests_dir.name, self.tests_dir)
         project = ProjectDf(name=self.tests_dir.name, desc=f'Project {self.tests_dir.name}')
         project.add_suite(*self._gather_suites())
         return project
@@ -1038,46 +1110,53 @@ class DirectoryTestsParser(DefinitionParser):
                 result.append(suite)
         return result
 
-    def _should_exclude(self, sub: Path):
+    def _should_exclude(self, sub: Path) -> bool:
+        # pylint: disable=R0201
         name = sub.name
         return not sub.is_dir() or name.startswith('.') or name.startswith('_')
 
     def _parse_suite(self, folder: Path) -> 'SuiteDf':
-        self.log.info(f"[PARSE] Suite '{folder.name}' in folder: {folder}")
-        suite = SuiteDf(name=folder.name, desc=f'Suite {folder.name} for {folder}')
+        name = folder.name
+        self.log.info("[PARSE] Suite '%s' in folder: '%s'", name, folder)
+        stage = _parse_lines(_resolve_file(folder, name, ext='stage'))
+        if stage:
+            self.log.debug("[PARSE] Suite '%s' files to stage: '%s'", name, stage)
+        suite = SuiteDf(name=name, desc=f'Suite {name} for {folder}', stage=stage)
         suite.add_test(*self._gather_tests(folder))
         return suite
 
     def _gather_tests(self, folder: Path) -> List[TestDf]:
         names = self._gather_test_names(folder)
-        tests = []
-        for name in names:
-            test = self._parse_test(folder, name)
-            tests.append(test)
-        return tests
+        return [self._parse_test(folder, name) for name in names]
 
     def _parse_test(self, folder: Path, name: str):
-        self.log.info(f"[PARSE] Test '{name}'")
+        self.log.info("[PARSE] Test '%s'", name)
         action = ExecAction.make_df(
-            args=_parse_args(_resolve_file(folder, name, ext='args', default=None)),
+            args=_parse_lines(_resolve_file(folder, name, ext='args')),
             stdin=_resolve_file(folder, name, ext='in'),
-            env=_parse_env(_resolve_file(folder, name, ext='env', default=None))
+            env=_parse_env(_resolve_file(folder, name, ext='env'))
         )
-        test = TestDf(name=name, desc=f"Test {name}", action=action)
+        stage = _parse_lines(_resolve_file(folder, name, ext='stage'))
+        if stage:
+            self.log.debug("[PARSE] Test '%s' files to stage: %s", name, stage)
+        test = TestDf(name=name, desc=f"Test {name}", action=action, stage=stage)
         validations = self._parse_validations(folder, name)
         test.add_validation(*validations)
         return test
 
     def _parse_validations(self, folder: Path, name: str):
+        def _rslv_out(pth: Optional[Path]) -> Dict[str, Any]:
+            return {'file': pth} if pth else {'empty': True}
+
         validations = [
             # STDOUT
             FileValidation.make_df(
-                _resolve_file(folder, name, 'out', {'empty': True}),
+                _rslv_out(_resolve_file(folder, name, 'out', None)),
                 selector='@stdout',
             ),
             # STDERR
             FileValidation.make_df(
-                _resolve_file(folder, name, 'err', {'empty': True}),
+                _rslv_out(_resolve_file(folder, name, 'err', None)),
                 selector='@stderr',
             ),
             # EXIT CODE (the main original RETURN VALUE)
@@ -1085,20 +1164,23 @@ class DirectoryTestsParser(DefinitionParser):
         ]
 
         files_map = _parse_files_map(_resolve_file(folder, name, 'files', None))
-        for fm in files_map:
-            exp_path = folder / fm['expected']
+        for f_map in files_map:
+            exp_path = folder / f_map['expected']
             if not exp_path.exists():
-                self.log.warning(f"[PARSE] File mapping - {exp_path} does not exists!")
+                self.log.warning("[PARSE] File mapping - '%s' does not exists!", exp_path)
                 continue
-            self.log.debug(f"[PARSE] Validation files mapping: {fm}")
+            self.log.debug("[PARSE] Validation files mapping: %s", f_map)
             validations.append(
-                FileValidation.make_df(expected=exp_path, selector=fm['provided'])
+                FileValidation.make_df(
+                    expected={'file': exp_path},
+                    selector=f_map['provided']
+                )
             )
         return validations
 
     def _gather_test_names(self, folder: Path) -> Set[str]:
         names = set()
-        LOG.debug(f"Gathering tests in: {folder}")
+        self.log.debug("Gathering tests in: '%s'", folder)
         for pth in folder.glob("*.*"):
             if pth.suffix in FILE_EXTENSIONS:
                 names.add(pth.stem)
@@ -1107,7 +1189,7 @@ class DirectoryTestsParser(DefinitionParser):
                 parts = pth.stem.split(".")
                 if len(parts) > 1:
                     names.add(parts[0])
-        self.log.debug(f"Found tests: {names}")
+        self.log.debug("Found tests: %s", names)
         return names
 
 
@@ -1118,7 +1200,7 @@ class MiniHwParser(DirectoryTestsParser):
         return not sub.is_dir() or not sub.name.lower().startswith("task")
 
     def _parse_suite(self, folder: Path) -> 'SuiteDf':
-        suite = super(MiniHwParser, self)._parse_suite(folder)
+        suite = super()._parse_suite(folder)
         task_name = suite.name
         target = self.params.get('target', 'solution')
         task_build_dir = self.tests_dir / 'build' / task_name / f"{task_name}-{target}"
@@ -1150,25 +1232,26 @@ class FileScenarioDefParser(DefinitionParser):
         if not files:
             return None
         result = []
-        for pf in files:
-            parsed = load_def_file(pf)
+        for proj_file in files:
+            parsed = load_def_file(proj_file)
             if not parsed:
                 continue
             if 'project' in parsed:
-                parsed['project_file'] = pf
-                LOG.info(f'[PARSE] Project File: "{pf}"')
+                parsed['project_file'] = proj_file
+                LOG.info("[PARSE] Project File: '%s'", proj_file)
                 result.append(parsed)
         if len(result) > 1:
             LOG.warning("There are multiple projects found - this should not happen. "
-                        f"The first one will be used: {result[0]['project_file']}")
+                        "The first one will be used: %s",
+                        result[0]['project_file'])
         return result[0] if result else None
 
     def parse_suite_files(self, project: ProjectDf, suites_list: List[str]) -> List['SuiteDf']:
         suite_files = self._find_suite_files(suites_list)
         suites = []
-        for sf in suite_files:
-            LOG.info(f'[PARSE] Suite File: "{sf}"')
-            sfd = load_def_file(sf)
+        for suite_file in suite_files:
+            LOG.info("[PARSE] Suite File: '%s'", suite_file)
+            sfd = load_def_file(suite_file)
             if not sfd or 'suite' not in sfd:
                 continue
             suite = self.parse_suite(project, sfd)
@@ -1186,7 +1269,7 @@ class FileScenarioDefParser(DefinitionParser):
         return result
 
     def parse_suite(self, project: ProjectDf, sfd: Dict[str, Any]) -> 'SuiteDf':
-        LOG.debug(f'[PARSE] Suite: {sfd}')
+        LOG.debug("[PARSE] Suite: '%s'", sfd)
         suite_prop = sfd['suite']
         stage_prop = sfd.get('data', sfd.get('stage'))
         suite = SuiteDf(
@@ -1197,65 +1280,75 @@ class FileScenarioDefParser(DefinitionParser):
         )
         project.add_suite(suite)
         tests_list = sfd.get('tests')
-        for td in tests_list:
-            self.parse_test(suite, td)
+        for test_def in tests_list:
+            self.parse_test(suite, test_def)
         return suite
 
-    def parse_test(self, suite: SuiteDf, td: Dict[str, Any]):
-        params = td.get('params', {})
+    def parse_test(self, suite: SuiteDf, tdf: Dict[str, Any]):
+        params = tdf.get('params', {})
         test = TestDf(
-            name=td['name'],
-            desc=td.get('desc'),
+            name=tdf['name'],
+            desc=tdf.get('desc'),
             params=params,
-            stage=td.get('data', td.get('stage')),
-            action=self.parse_action(td)
+            stage=tdf.get('data', tdf.get('stage')),
+            action=self.parse_action(tdf)
         )
-        vals_prop = td.get('validations', [])
+        vals_prop = tdf.get('validations', [])
         for val in vals_prop:
             test.add_validation(self._parse_explicit_action(val))
-        self._add_default_validations(td, test)
+        self._add_default_validations(tdf, test)
         suite.add_test(test)
 
-    def _add_default_validations(self, td, test: 'TestDf'):
-        validations = [
-            FileValidation.parse(expected=td.get('out', {'empty': True}), selector='@stdout'),
-            FileValidation.parse(expected=td.get('err', {'empty': True}), selector='@stderr'),
-            ExitCodeValidation.parse(td.get('exit')),
-        ]
+    def _add_default_validations(self, test_d, test: 'TestDf'):
         test.add_validation(
-            *validations
+            FileValidation.parse(expected=test_d.get('out'), selector='@stdout'),
+            FileValidation.parse(expected=test_d.get('err'), selector='@stderr'),
+            ExitCodeValidation.parse(test_d.get('exit', 0)),
         )
-        for f in td.get('files', []):
+
+        for f in test_d.get('files', []):
             test.add_validation(
                 FileValidation.parse(
                     expected=f.get('exp', f.get('expected', f.get('e'))),
                     selector=f.get('provided', f.get('prov', f.get('p'))),
                 )
             )
-        self.log.trace(f"[PARSE] Default Validations for '{test.nm}': {test.validations} ")
+        self.log.trace("[PARSE] Default Validations for '%s': %s", test.nm, test.validations)
 
-    def parse_action(self, td: Dict[str, Any]) -> ActionDf:
-        act = td.get('action')
+    def parse_action(self, test_df: Dict[str, Any]) -> ActionDf:
+        act = test_df.get('action')
         if act:
             return self._parse_explicit_action(act)
 
         return ExecAction.make_df(
-            args=td.get('args'),
-            stdin=td.get('in'),
-            env=td.get('env'),
+            args=test_df.get('args'),
+            stdin=test_df.get('in'),
+            env=test_df.get('env'),
         )
 
-    def _parse_explicit_action(self, act):
-        self.log.debug(f"[PARSE] Action: {act}")
+    def _parse_explicit_action(self, act) -> 'ActionDf':
+        self.log.debug("[PARSE] Action: %s", act)
         if isinstance(act, str):
             act = {'name': act, 'desc': f'Action {act}'}
         return ActionDf(name=act['name'], desc=act.get('desc'), params=act.get('params'))
 
 
+class AutoScenarioParser(DefinitionParser):
+    NAME = 'auto'
+
+    def parse(self) -> Optional[ProjectDf]:
+        for ext in ('yml', 'yaml', 'json'):
+            glob = list(self.tests_dir.glob(f'project*.{ext}'))
+            if len(glob) > 0:
+                return FileScenarioDefParser(self.params).parse()
+        return DirectoryTestsParser(self.params).parse()
+
+
 PARSERS = {c.NAME: c for c in [
     MiniHwParser,
     DirectoryTestsParser,
-    FileScenarioDefParser
+    FileScenarioDefParser,
+    AutoScenarioParser,
 ]}
 
 
@@ -1272,7 +1365,7 @@ def obj_as_dict(obj, pred: Callable[[str, Any], bool] = None) -> Dict[str, Any]:
 
 
 def dict_serialize(obj, as_dict_skip: bool = False) -> Any:
-    if obj is None or isinstance(obj, str) or isinstance(obj, int):
+    if obj is None or isinstance(obj, (str, int)):
         return obj
     if isinstance(obj, list):
         return [dict_serialize(i) for i in obj]
@@ -1298,8 +1391,8 @@ def dict_serialize(obj, as_dict_skip: bool = False) -> Any:
     return str(obj)
 
 
-def dump_as_dict(d, frm: str = 'json', indent: int = 4, **kwargs) -> str:
-    data = dict_serialize(d)
+def dump_as_dict(dictionary, frm: str = 'json', indent: int = 4, **kwargs) -> str:
+    data = dict_serialize(dictionary)
     frm = frm.lower()
 
     if frm in ('yaml', 'yml', 'y'):
@@ -1314,7 +1407,7 @@ def dump_as_dict(d, frm: str = 'json', indent: int = 4, **kwargs) -> str:
 
 def load_def_file(file: Path) -> Optional[Dict[str, Any]]:
     if not file.exists():
-        LOG.warning(f"Provided file not found: {file.suffix}")
+        LOG.warning("Provided file '%s' not found", file.suffix)
         return None
     with file.open('r') as fd:
         if file.suffix == '.json':
@@ -1326,7 +1419,7 @@ def load_def_file(file: Path) -> Optional[Dict[str, Any]]:
             except ImportError:
                 LOG.error("YAML definitions require package: PyYaml")
                 return None
-        LOG.error(f"Unsupported file format for definition: {file.suffix}")
+        LOG.error("Unsupported file format '%s' for definition", file.suffix)
         return None
 
 
@@ -1337,7 +1430,7 @@ def _resolve_file(folder: Path, name: str, ext: str, default: Any = None) -> Opt
     return default
 
 
-def _parse_args(f: Optional[Path]) -> List[str]:
+def _parse_lines(f: Optional[Path]) -> List[str]:
     return list(f.read_text('utf-8').splitlines(keepends=False)) if f else []
 
 
@@ -1380,10 +1473,10 @@ def _trunc_read(provided: Path, size: int = 0):
         return data
 
 
-def _verbose_wrap(section: str, data: str, fl='#'):
+def _verbose_wrap(section: str, data: str, spc='#'):
     section = section.upper()
-    fl = fl * 3
-    return f'{fl} {section} {fl}\n{data}\n{fl} END {section} {fl}\n'
+    spc = spc * 3
+    return f'{spc} {section} {spc}\n{data}\n{spc} END {section} {spc}\n'
 
 
 def execute_cmd(cmd: str, args: List[str], ws: Path, stdin: Optional[Path] = None,
@@ -1391,10 +1484,11 @@ def execute_cmd(cmd: str, args: List[str], ws: Path, stdin: Optional[Path] = Non
                 log: logging.Logger = None, timeout: int = 60,
                 env: Dict[str, Any] = None, cwd: Union[str, Path] = None,
                 **kwargs) -> 'CommandResult':
+    # pylint: disable=R0914,R0913
     log = log or LOG
-    log.info(f"[CMD] Exec: '{cmd}' with args {args}")
-    log.debug(f" -> [CMD] Exec STDIN: %s", stdin if stdin else "EMPTY")
-    log.trace(f" -> [CMD] Exec with timeout {timeout}, cwd: {cwd}")
+    log.info("[CMD] Exec: '%s' with args %s", cmd, str(args))
+    log.debug(" -> [CMD] Exec STDIN: '%s'", stdin if stdin else "EMPTY")
+    log.trace(" -> [CMD] Exec with timeout %d, cwd: '%s'", timeout, cwd)
     nm = nm or cmd
     stdout = stdout or ws / f'{nm}.stdout'
     stderr = stderr or ws / f'{nm}.stderr'
@@ -1412,22 +1506,23 @@ def execute_cmd(cmd: str, args: List[str], ws: Path, stdin: Optional[Path] = Non
                 stdin=fd_in,
                 timeout=timeout,
                 env=full_env,
+                check=False,
                 cwd=str(cwd) if cwd else None,
                 **kwargs
             )
         except Exception as ex:
-            log.error(f"[CMD] Execution '{cmd}' failed: {ex}")
+            log.error("[CMD] Execution '%s' failed: %s", cmd, ex)
             raise ex
         finally:
             end_time = time.perf_counter_ns()
             if fd_in:
                 fd_in.close()
 
-    log.debug(f"[CMD] Result[exit={exec_result.returncode}]: {exec_result}")
-    log.trace(f" -> Command stdout {stdout}")
-    log.trace(f"STDOUT: {stdout.read_bytes()}")
-    log.trace(f" -> Command stderr {stderr}")
-    log.trace(f"STDERR: {stderr.read_bytes()}")
+    log.debug("[CMD] Result[exit=%d]: %s", exec_result.returncode, str(exec_result))
+    log.trace(" -> Command stdout '%s'", stdout)
+    log.trace("STDOUT: %s", stdout.read_bytes())
+    log.trace(" -> Command stderr '%s'", stderr)
+    log.trace("STDERR: %s", stderr.read_bytes())
 
     return CommandResult(
         exit_code=exec_result.returncode,
@@ -1455,6 +1550,45 @@ def to_bool(val: Any) -> bool:
         return val.lower() in ('y', 'on', 'yes', 'enable')
 
     return bool(val)
+
+
+def safer_eval(expr: str, variables: Any = None) -> Any:
+    # license: MIT (C) tardyp
+    """
+    Safely evaluate a a string containing a Python
+    expression.  The string or node provided may only consist of the following
+    Python literal structures: strings, numbers, tuples, lists, dicts, booleans,
+    and None. safe operators are allowed (and, or, ==, !=, not, +, -, ^, %, in, is)
+    """
+    import ast
+    _safe_names = {'None': None, 'True': True, 'False': False}
+    _safe_nodes = (
+        'Add', 'And', 'BinOp', 'BitAnd', 'BitOr', 'BitXor', 'BoolOp',
+        'Compare', 'Dict', 'Eq', 'Expr', 'Expression', 'For',
+        'Gt', 'GtE', 'Is', 'In', 'IsNot', 'LShift', 'List',
+        'Load', 'Lt', 'LtE', 'Mod', 'Name', 'Not', 'NotEq', 'NotIn',
+        'Num', 'Or', 'RShift', 'Set', 'Slice', 'Str', 'Sub',
+        'Tuple', 'UAdd', 'USub', 'UnaryOp', 'boolop', 'cmpop',
+        'expr', 'expr_context', 'operator', 'slice', 'unaryop',
+        'Constant', 'Mult', 'Pow', 'Div')
+    node = ast.parse(expr, mode='eval')
+    for subnode in ast.walk(node):
+        subnode_name = type(subnode).__name__
+        if isinstance(subnode, ast.Name):
+            if subnode.id not in _safe_names and subnode.id not in variables:
+                raise ValueError("Unsafe expression {}. contains {}".format(expr, subnode.id))
+        if subnode_name not in _safe_nodes:
+            raise ValueError("Unsafe expression {}. contains {}".format(expr, subnode_name))
+    # pylint: disable=W0123
+    return eval(expr, variables)
+
+
+def safer_eval_cond(expr: str, variables: Any = None) -> bool:
+    try:
+        return safer_eval(expr, variables=variables)
+    except Exception as ex:
+        LOG.error("[EVL] Eval Error: '%s': %s", expr, ex)
+        return False
 
 
 ##
@@ -1500,56 +1634,55 @@ class TColors:
     def __init__(self, colors: bool = True):
         self._colors = colors
 
-    def fail(self, s: str) -> str:
-        return self.wrap(self.RED, s)
+    def fail(self, text: str) -> str:
+        return self.wrap(self.RED, text)
 
-    def passed(self, s: str) -> str:
-        return self.wrap(self.GREEN, s)
+    def passed(self, text: str) -> str:
+        return self.wrap(self.GREEN, text)
 
-    def warn(self, s: str) -> str:
-        return self.wrap(self.YELLOW, s)
+    def warn(self, text: str) -> str:
+        return self.wrap(self.YELLOW, text)
 
-    def head(self, s: str) -> str:
-        return self.wrap(self.MAGENTA, s)
+    def head(self, text: str) -> str:
+        return self.wrap(self.MAGENTA, text)
 
-    def wrap(self, color_prefix: str, s: str) -> str:
+    def wrap(self, color_prefix: str, text: str) -> str:
         if not self._colors:
-            return s
-        return f"{color_prefix}{s}{self.ENDC}"
+            return text
+        return f"{color_prefix}{text}{self.ENDC}"
 
 
 def print_project_df(pdf: 'ProjectDf', colors: bool = True):
-    tc = TColors(colors)
-    print(f"Project: [{tc.wrap(tc.GREEN, pdf.id)}] :: {pdf.desc}")
+    term = TColors(colors)
+    print(f"Project: '{term.wrap(term.GREEN, pdf.id)}' :: {pdf.desc}")
     for sdf in pdf.suites:
-        print(f"\tSuite: [{tc.wrap(tc.GREEN, sdf.id)}]", f":: {sdf.desc}")
+        print(f"\tSuite: '{term.wrap(term.GREEN, sdf.id)}'", "::", sdf.desc)
         for test in sdf.tests:
-            print(f"\t- Test: [{tc.wrap(tc.CYAN, test.id)}] :: {test.desc} "
+            print(f"\t- Test: '{term.wrap(term.CYAN, test.id)}' :: {test.desc} "
                   f"(Actions: {len(test.validations)})")
             if test.action:
                 act = test.action
-                print(f"\t\t ->  Main: [{tc.wrap(tc.MAGENTA, act.id)}] : {act.desc}")
+                print(f"\t\t ->  Main '{term.wrap(term.MAGENTA, act.id)}': {act.desc}")
             for action in test.validations:
-                print(
-                    f"\t\t * Action: [{tc.wrap(tc.MAGENTA, action.id)}] : {action.desc}"
-                )
+                print(f"\t\t * Action '{term.wrap(term.MAGENTA, action.id)}': {action.desc}")
         print()
 
 
 def print_project_result(p_res: 'ProjectResult', with_actions: bool = False,
                          colors: bool = True, verbose_size: int = 0):
-    tc = TColors(colors)
+    term_col = TColors(colors)
 
-    def _prk(r: 'RunResultType'):
-        color = tc.RED if r.kind.is_fail() else tc.GREEN
-        return tc.wrap(color, f"[{r.kind.value.upper()}]")
+    def _prk(res: 'RunResultType'):
+        color = term_col.RED if res.kind.is_fail() else term_col.GREEN
+        return term_col.wrap(color, f"[{res.kind.value.upper()}]")
 
-    def _p(r: 'RunResultType', t: str):
-        p = f"{_prk(r)} {t.capitalize()}: ({r.df.name}) :: {r.df.desc}"
-        if isinstance(r, RunResult):
-            p += f" (All: {r.n_subs}; Failed: {r.n_failed}; " \
-                 f"Passed: {r.n_passed}; Skipped: {r.n_skipped})"
-        return p
+    def _p(res: 'RunResultType', kind: str):
+        line = f"{_prk(res)} {kind.capitalize()}: " \
+               f"({res.df.name}) :: {res.df.desc}"
+        if isinstance(res, RunResult):
+            line += f" (All: {res.n_subs}; Failed: {res.n_failed}; " \
+                    f"Passed: {res.n_passed}; Skipped: {res.n_skipped})"
+        return line
 
     print(_p(p_res, 'Project'))
     for s_res in p_res.suites:
@@ -1560,9 +1693,9 @@ def print_project_result(p_res: 'ProjectResult', with_actions: bool = False,
                 if t_res.msg:
                     print(f"\t\t Message: {t_res.msg}")
             pad = "\t\t*"
-            for pc in t_res.preconditions:
-                if not pc.is_ok() or with_actions:
-                    print(f"{pad} {_p(pc, 'Pre-condition')}")
+            for pre_cond in t_res.preconditions:
+                if not pre_cond.is_ok() or with_actions:
+                    print(f"{pad} {_p(pre_cond, 'Pre-condition')}")
             if t_res.main_action.is_fail() or with_actions:
                 print(f"{pad} {_p(t_res.main_action, 'Main')}")
             for act_res in t_res.actions:
@@ -1593,7 +1726,7 @@ def dump_junit_report(p_res: 'ProjectResult', ws_root: Path,
     if not report_dir.exists():
         report_dir.mkdir(parents=True)
     report_path = report_dir / f'{report_name}.xml'
-    LOG.info(f"[REPORT] Generating JUNIT report: {report_path}")
+    LOG.info("[REPORT] Generating JUNIT report: %s", report_path)
     junit_suites = junitparser.JUnitXml(p_res.df.name)
     for s_res in p_res.suites:
         unit_suite = junitparser.TestSuite(name=s_res.df.name)
@@ -1607,9 +1740,9 @@ def dump_junit_report(p_res: 'ProjectResult', ws_root: Path,
             if test_res.kind.is_pass():
                 continue
             fails = []
-            for a in test_res.actions:
-                fail = junitparser.Failure(a.msg)
-                fail.text = "\n" + a.fail_msg()
+            for act in test_res.actions:
+                fail = junitparser.Failure(act.msg)
+                fail.text = "\n" + act.fail_msg()
                 fails.append(fail)
             junit_case.result = fails
             if test_res.cmd_res:
@@ -1658,7 +1791,7 @@ def make_cli_parser() -> argparse.ArgumentParser:
                          help='Location of the testing workspace - outputs/artifacts',
                          default=None)
         sub.add_argument('-p', '--parser', type=str,
-                         help=f'Use specific parser ({parser_names})',
+                         help=f'Use specific parser ({parser_names}), default is "auto"',
                          default=None)
         sub.add_argument('--no-color', action='store_true', default=False,
                          help='Print output without color')
@@ -1711,9 +1844,9 @@ def _app_get_cfg(args) -> 'RunParams':
 
     params = RunParams(app_cfg)
 
-    LOG.info(f"[PATHS] Executable: {params.executable}")
-    LOG.info(f"[PATHS] Test dir: {params.tests_dir}")
-    LOG.info(f"[PATHS] Workspace: {params.ws}")
+    LOG.info("[PATHS] Executable: %s", params.executable)
+    LOG.info("[PATHS] Test dir: %s", params.tests_dir)
+    LOG.info("[PATHS] Workspace: %s", params.ws)
     return params
 
 
@@ -1723,7 +1856,7 @@ def _app_parse_project(cfg: RunParams, args) -> Optional[ProjectDf]:
         return None
     # Extract to registry
 
-    parser = PARSERS.get(args.parser, DirectoryTestsParser)
+    parser = PARSERS.get(args.parser, AutoScenarioParser)
     parser_instance = parser(cfg)
     return parser_instance.parse()
 
@@ -1755,7 +1888,6 @@ def load_logger(level: str = 'INFO'):
             }
         }
     }
-    import logging.config
     logging.config.dictConfig(log_config)
 
 

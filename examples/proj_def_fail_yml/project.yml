@@ -1,0 +1,6 @@
+project:
+  name: sample_fail_project
+  desc: Sample failing project
+
+suites:
+  - "suite*.yml"

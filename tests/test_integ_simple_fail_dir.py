@@ -4,9 +4,9 @@ import pytest as pytest
 
 import exiot
 from exiot import RunParams
-from .prepenv import PREP_DATA_PATH
+from .prepenv import EXAMPLES_PATH
 
-PREP_DATA_SINGLE_PATH = PREP_DATA_PATH / 'single_fail'
+PREP_DATA_SINGLE_PATH = EXAMPLES_PATH / 'single_fail'
 
 
 @pytest.fixture(scope='module')
@@ -83,6 +83,3 @@ def test_fail_unknown(run_params, fail_run: exiot.ProjectResult):
 
     assert len(test.actions) == 3
     assert test.n_failed == 2
-
-
-
