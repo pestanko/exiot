@@ -34,7 +34,7 @@ from typing import Any, Dict, Optional, List, Union, Set, TypeVar, Type, Mapping
 
 PYTHON_REQUIRED = "3.7"
 APP_NAME = "exiot"
-APP_VERSION = "0.0.1-alpha.2"
+APP_VERSION = "0.0.1-alpha.3"
 APP_DESC = f"""
 Executable I/O Testing Tool ({APP_NAME})
 is a testing tool to test the executable STDIN, STDOUT, STDERR, and many more.
