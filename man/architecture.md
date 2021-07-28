@@ -2,22 +2,28 @@
 
 Simple description of the internal architecture.
 
-Project -> Suite -> Test
+Project -> Suite -> Test (three structure where the Project is the root)
 
-At the top level there is **Project**, project can consits from multiple **Suites**, each suite can contain multiple **Tests**.
+At the top level there is **Project**, project can consist from multiple **Suites**,
+each suite can contain multiple **Tests**.
 
 Each Project, Suite and Test (let's call them entities) has these common fields:
-- _metadata_ contains information about the entity like (it's _name_, _description_, ...)
-- _settings_ contains configuration that is passed down to the runtime that would evaluate _tests_
+- `id` - Unique identifier - from sanitized name
+- `name` - Name
+- `desc` - Description
+- `namespace` - fully-qualified namespace (string representation for test: `/project_id/suite_id/test_id`)
+- `params` - Optional parameters - that are propagated from Project -> Suite -> Test
 
-Project and Suite are mostly namespaces that are grouping tests and it's results - but tests are the most important part.
+Project and Suite are mostly namespaces that are groups of tests and it's results - but tests are the most important part.
+Project and Suite params are shared among all the tests.
 
 ## Test
 
 Test consists of:
+
 - _preconditions_: whether test should be executed or not
 - _action_: what action should be executed (default: 'exec', execute the command)
-- _validators_: List of validation checks that will test whether the _action_ was executed properly
+- _validations_: List of validation checks that will test whether the _action_ was executed properly
 
 
 

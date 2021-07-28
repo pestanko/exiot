@@ -10,6 +10,7 @@ Authors:
 """
 import abc
 import argparse
+import base64
 import collections.abc
 import copy
 import enum
@@ -42,7 +43,7 @@ Tool is parsing provided test scenarios using multiple parsers.
 """
 
 LOG = logging.getLogger(APP_NAME)
-FILE_EXTENSIONS = ('.in', '.out', '.err', '.files', '.args', '.exit')
+FILE_EXTENSIONS = ('.in', '.out', '.err', '.files', '.args', '.exit', '.env')
 
 DParams = Dict[str, Any]
 
@@ -95,7 +96,7 @@ class RunParams(AsDict):
             'ws': Path(ws) if ws else Path(tempfile.mkdtemp(prefix=APP_NAME + "-")),
             'timeout': data.get('timeout', 10),
             'valgrind': to_bool(data.get('valgrind', False)),
-            'devel_mode': to_bool(data.get('devel_mode', True)),
+            'devel_mode': to_bool(data.get('devel_mode', False)),
         })
         self.raw = data
 
@@ -908,7 +909,12 @@ class FileValidation(GeneralAction):
         if match is not None:
             return self._match_file_content(provided, pattern=match)
 
-        content = exp.get('content')
+        base64content = exp.get('base64')
+        if base64content is not None:
+            content = base64.b64decode(base64content)
+        else:
+            content = exp.get('content')
+
         if content is not None:
             fp = self._make_expected_output(content)
         else:
@@ -1454,7 +1460,7 @@ def _parse_files_map(file: Optional[Path]) -> List[Dict[str, str]]:
             if not line or line.startswith("#") or ';' not in line:
                 continue
             parts = line.split(';')
-            result.append({'expected': parts[0], 'provided': parts[1]})
+            result.append({'expected': parts[0].strip(), 'provided': parts[1].strip()})
     return result
 
 
