@@ -69,7 +69,7 @@ python -m exiot parse -o yaml examples/single_fail
 
 Tool is currently supporting these parsers:
 
-- [``mini``](man/minihw_def.md) - MiniHomework parser for _MUNI FI:PB071_ course (`examples/minihw_not_impl`)
+- [``minihw``](man/minihw_def.md) - MiniHomework parser for _MUNI FI:PB071_ course (`examples/minihw_not_impl`)
 - [``dir``](man/directory_def.md) - Directory parser (`examples/single`, `examples/single_fail`)
 - [``scenario``](man/scenario_def.md) - Scenario parser, this is most advanced parser, and it is the preferred way to
   write tests

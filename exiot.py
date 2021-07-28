@@ -1199,7 +1199,7 @@ class DirectoryTestsParser(DefinitionParser):
 
 
 class MiniHwParser(DirectoryTestsParser):
-    NAME = "mini"
+    NAME = "minihw"
 
     def _should_exclude(self, sub: Path):
         return not sub.is_dir() or not sub.name.lower().startswith("task")
@@ -1825,7 +1825,7 @@ def make_cli_parser() -> argparse.ArgumentParser:
                         help="Set log level (DEBUG|INFO|WARNING|ERROR)", default=None)
     subs = parser.add_subparsers(title="Available ")
     # Parse
-    sub_parse = subs.add_parser("parse", help="Parse and print the mini hw scenario")
+    sub_parse = subs.add_parser("parse", help="Parse and print the test scenario")
     sub_parse.add_argument("-o", "--output", help="Output format (console|json|yaml)",
                            default="console")
     _shared_options(sub_parse)
