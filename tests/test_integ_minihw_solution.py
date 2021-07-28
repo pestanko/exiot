@@ -43,6 +43,7 @@ def succ_run(run_params: RunParams) -> exiot.ProjectResult:
 @pytest.mark.slow
 @pytest.mark.cmake
 @pytest.mark.integ
+@pytest.mark.passing
 def test_run_minihw(succ_run: exiot.ProjectResult):
     assert succ_run.is_pass()
     for suite in succ_run.suites:

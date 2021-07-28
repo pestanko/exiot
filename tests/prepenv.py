@@ -33,10 +33,10 @@ def _exec_cmd(args: List[str]) -> Optional[subprocess.CompletedProcess]:
     try:
         res = subprocess.run(args)
     except Exception as ex:
-        TEST_LOG.warning(f"[EXE] Unable to bld using '{args[0]}': {ex}")
+        exiot.LOG.warning(f"[EXE] Unable to bld using '{args[0]}': {ex}")
         return None
-    TEST_LOG.debug(f"[EXE] {args} [exit={res.returncode}] STDOUT:  {res.stdout}")
-    TEST_LOG.debug(f"[EXE] {args} [exit={res.returncode}] STDERR: {res.stderr}")
+    exiot.LOG.debug(f"[EXE] {args} [exit={res.returncode}] STDOUT:  {res.stdout}")
+    exiot.LOG.debug(f"[EXE] {args} [exit={res.returncode}] STDERR: {res.stderr}")
     if res.returncode != 0:
         return None
     return res
@@ -44,8 +44,8 @@ def _exec_cmd(args: List[str]) -> Optional[subprocess.CompletedProcess]:
 
 def build_cmake(root: Path, bld: Optional['Path'] = None) -> Optional[subprocess.CompletedProcess]:
     bld = bld if bld else root / 'build'
-    args = ['cmake', '-B', str(bld), str(root)]
-    res = _exec_cmd(args)
+    res = _exec_cmd(['cmake', '-B', str(bld), str(root)])
+    assert res
     if res.returncode != 0:
         return res
 

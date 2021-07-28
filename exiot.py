@@ -20,6 +20,7 @@ import logging
 import logging.config
 import os
 import re
+import shlex
 import shutil
 import string
 import subprocess
@@ -939,9 +940,11 @@ class FileValidation(GeneralAction):
 
     def _compare_file_content(self, provided: Path, exp: Path) -> 'ActionResult':
         exp = self.ctx.resolve_data_file(exp)
+        diff_params: List['str'] = self.ctx.params.get('diff_params', [])
+        diff_params.append('--strip-trailing-cr')
         diff_exec = execute_cmd(
             'diff',
-            args=['-u', str(exp), str(provided)],
+            args=['-u', *diff_params, str(exp), str(provided)],
             ws=self.ctx.ws(),
             nm=f"diff-{self.ctx.nm.current}"
         )
@@ -1784,7 +1787,11 @@ def cli_exec(args: argparse.Namespace):
     with_actions = args.with_actions
     colors = not args.no_color
     print_project_result(result, with_actions=with_actions, colors=colors)
-    report = dump_junit_report(result, ws_root=cfg.ws)
+    report = dump_junit_report(
+        result,
+        ws_root=cfg.ws,
+        report_name=f'report_{project_df.id}.xml'
+    )
     if report:
         print("JUNIT REPORT:", report)
 
@@ -1901,6 +1908,8 @@ def _app_get_cfg(args: argparse.Namespace) -> 'RunParams':
     defn = args.define
     if defn:
         app_cfg.update(parse_params_defs(defn))
+
+    app_cfg['diff_params'] = shlex.split(app_cfg.get('diff_params', ''))
     params = RunParams(app_cfg)
 
     load_logger(_get_log_level(args), log_file=(params.ws / 'tests.log'))

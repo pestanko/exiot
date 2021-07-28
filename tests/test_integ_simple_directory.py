@@ -19,6 +19,7 @@ def run_params(tmp_path_factory, echocat_exe: Path) -> RunParams:
 
 
 @pytest.mark.integ
+@pytest.mark.passing
 def test_directory_struct(run_params):
     parser = exiot.DirectoryTestsParser(run_params)
     project = parser.parse()
@@ -41,6 +42,7 @@ def test_directory_struct(run_params):
 
 
 @pytest.mark.integ
+@pytest.mark.passing
 def test_directory_run(run_params):
     parser = exiot.DirectoryTestsParser(run_params)
     project = parser.parse()

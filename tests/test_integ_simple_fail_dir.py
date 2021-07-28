@@ -29,12 +29,14 @@ def fail_run(run_params) -> exiot.ProjectResult:
 
 
 @pytest.mark.integ
+@pytest.mark.failing
 def test_fail_dir_run_full(run_params, fail_run: exiot.ProjectResult):
     assert fail_run.is_fail()
     assert len(fail_run.suites) == 1
 
 
 @pytest.mark.integ
+@pytest.mark.failing
 def test_fail_exit_mismatch(run_params, fail_run: exiot.ProjectResult):
     suite = fail_run.suites[0]
     assert suite.is_fail()
@@ -49,6 +51,7 @@ def test_fail_exit_mismatch(run_params, fail_run: exiot.ProjectResult):
 
 
 @pytest.mark.integ
+@pytest.mark.failing
 def test_fail_out_mismatch(run_params, fail_run: exiot.ProjectResult):
     suite = fail_run.suites[0]
     assert suite.is_fail()
@@ -63,6 +66,7 @@ def test_fail_out_mismatch(run_params, fail_run: exiot.ProjectResult):
 
 
 @pytest.mark.integ
+@pytest.mark.failing
 def test_fail_err_mismatch(run_params, fail_run: exiot.ProjectResult):
     suite = fail_run.suites[0]
     assert suite.is_fail()
@@ -77,6 +81,7 @@ def test_fail_err_mismatch(run_params, fail_run: exiot.ProjectResult):
 
 
 @pytest.mark.integ
+@pytest.mark.failing
 def test_fail_unknown(run_params, fail_run: exiot.ProjectResult):
     suite = fail_run.suites[0]
     assert suite.is_fail()

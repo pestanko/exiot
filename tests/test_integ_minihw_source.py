@@ -42,6 +42,7 @@ def proj_run(run_params: RunParams) -> exiot.ProjectResult:
 @pytest.mark.slow
 @pytest.mark.cmake
 @pytest.mark.integ
+@pytest.mark.failing
 def test_run_minihw_source(proj_run: exiot.ProjectResult):
     assert proj_run.is_fail()
     for suite in proj_run.suites:
