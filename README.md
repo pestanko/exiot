@@ -1,5 +1,7 @@
 # Executable I/O Testing Tool (exiot)
 
+![Exiot Tests Pipeline](https://github.com/pestanko/exiot/actions/workflows/tests.yml/badge.svg)
+
 The (`exiot`) is a testing tool to test the executable `STDIN`, `STDOUT`, `STDERR`, and many more.
 
 You can take a look to the (man/architecture.md)[Architecture] `man` documentation.
