@@ -35,7 +35,7 @@ def proj_run(run_params: RunParams) -> exiot.ProjectResult:
     project = parser.parse()
 
     result = exiot.ProjectRunner(run_params, project).run()
-    exiot.print_project_result(result, verbose_size=1000)
+    exiot.ConsoleReporter(run_params).report(result, verbose_size=1000)
     return result
 
 
