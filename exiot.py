@@ -1934,6 +1934,8 @@ def cli_parse(args: argparse.Namespace):
 def cli_exec(args: argparse.Namespace):
     cfg = _app_get_cfg(args)
     project_df = _app_parse_project(cfg, args)
+    if project_df is None:
+        raise AssertionError("No project definition found in test dir: ", cfg.tests_dir)
     runner = ProjectRunner(cfg, project=project_df)
     result = runner.run()
     with_actions = args.with_actions
@@ -1964,8 +1966,8 @@ def make_cli_parser() -> argparse.ArgumentParser:
         sub.add_argument('-p', '--parser', type=str,
                          help=f'Use specific parser ({parser_names}), default is "auto"',
                          default=None)
-        sub.add_argument('-D', '--define', action='append', nargs='*',
-                         help='Define/override parameter (format: \'-D "var=value"\')')
+        sub.add_argument('-D', '--define', action='append',
+                         help='Define/override parameter (format: \'-D "var:value"\')')
         sub.add_argument('--no-color', action='store_true', default=False,
                          help='Print output without color')
         sub.add_argument('tests', type=str, help='Test files location')
@@ -1999,10 +2001,14 @@ def main(args: Optional[List['str']] = None) -> int:
         parser.print_help()
         return 0
 
-    if not args.func(args):
-        print("\nExecution failed!")
-        return 1
-    return 0
+    try:
+        if not args.func(args):
+            print("\nExecution failed!")
+            return 1
+        return 0
+    except Exception as e:
+        print(f"\nExecution Failed: {e}", file=sys.stderr)
+        return 2
 
 
 def _get_log_level(args):
