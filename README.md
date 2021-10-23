@@ -107,6 +107,7 @@ using: `-D` or `--define` option.
 - `devel_mode` - Enable development mode, only for test development, not for "production"
 - `target` - for minihw you can toggle between `source|solution` executable testing (default: `source`)
 - `diff_params` - `diff` executable additional params
+- `junit_dump` - Print out the JUNIT dump at the end of the execution
 
 ## Examples
 

@@ -1149,7 +1149,12 @@ class DirectoryTestsParser(DefinitionParser):
         stage = _parse_lines(_resolve_file(folder, name, ext='stage'))
         if stage:
             self.log.debug("[PARSE] Test '%s' files to stage: %s", name, stage)
-        test = TestDf(name=name, desc=f"Test {name}", action=action, stage=stage)
+        test = TestDf(
+            name=name,
+            desc=f"Test Case '{name}' for '{folder.name}'",
+            action=action,
+            stage=stage
+        )
         validations = self._parse_validations(folder, name)
         test.add_validation(*validations)
         return test
@@ -1948,6 +1953,12 @@ def cli_exec(args: argparse.Namespace):
     )
     if report:
         print("JUNIT REPORT:", report)
+        if cfg.get('junit_dump', False):
+            try:
+                print("\nJUNIT REPORT CONTENT: \n")
+                print(pretty_print_xml(report))
+            except Exception as ex:
+                LOG.error("Unable to pretty print XML JUnit Report: ", ex)
 
     return result.is_pass()
 
@@ -2011,19 +2022,19 @@ def main(args: Optional[List['str']] = None) -> int:
         return 2
 
 
+def pretty_print_xml(path: Path) -> str:
+    import xml.dom.minidom
+
+    dom = xml.dom.minidom.parse(str(path))
+    return dom.toprettyxml()
+
+
 def _get_log_level(args):
     log_level = args.log_level
     if not log_level:
         log_level = os.getenv('LOG_LEVEL', 'error')
     return log_level
 
-
-PARAM_CONVERTERS = {
-    '@int': int,
-    '@float': float,
-    '@bool': to_bool,
-    '@path': Path,
-}
 
 DEFAULT_TCS: Dict[str, Callable[[str], Any]] = {
     '@bool': to_bool,
@@ -2064,14 +2075,18 @@ class ParamParser:
             return '', ''
         parts = param.split(self._delim, maxsplit=1)
         LOG.debug('[PARSE] Parse param "%s": %s', param, parts)
-        if len(parts) == 1:
-            return parts[0], True
-        key, val = (parts[0].strip(), parts[1].strip())
+        key = parts[0].strip()
 
+        val = self.parse_value(parts[1].strip() if len(parts) > 1 else None)
+        return key, val
+
+    def parse_value(self, val: str) -> Any:
+        if not val:
+            return True
         for (cvt_name, fn) in self._tc.items():
             if val.startswith(cvt_name):
-                return key, fn(val[len(cvt_name):].lstrip())
-        return key, val
+                return fn(val[len(cvt_name):].lstrip())
+        return val
 
 
 def _app_get_cfg(args: argparse.Namespace) -> 'RunParams':
@@ -2082,6 +2097,7 @@ def _app_get_cfg(args: argparse.Namespace) -> 'RunParams':
         no_color=args.no_color
     )
 
+    app_cfg.update(_parse_environ_params('EX'))
     defn = args.define
     if defn:
         parser = ParamParser.default()
@@ -2096,6 +2112,17 @@ def _app_get_cfg(args: argparse.Namespace) -> 'RunParams':
     LOG.info("[PATHS] Test dir: %s", params.tests_dir)
     LOG.info("[PATHS] Workspace: %s", params.ws)
     return params
+
+
+def _parse_environ_params(prefix: str = '') -> Dict[str, Any]:
+    parser = ParamParser.default()
+    prefix = f"{prefix}_" if prefix else ''
+    result = {}
+    for key, val in os.environ.items():
+        if key.startswith(prefix):
+            name = key[len(prefix):].lower()
+            result[name] = parser.parse_value(val)
+    return result
 
 
 def _app_parse_project(cfg: RunParams, args) -> Optional[ProjectDf]:
