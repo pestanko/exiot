@@ -28,7 +28,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Union, Set, TypeVar, Type, Mapping, Callable
+from typing import Any, Dict, Optional, List, Union, Set, TypeVar, Type, Mapping, Callable, Tuple
 
 ##
 # Global Definitions
@@ -71,7 +71,7 @@ class AsDict:
     """
 
     def as_dict(self, params: Dict = None) -> Dict:
-        data = obj_as_dict(self, lambda n, v: not callable(v) and not n.startswith("_"))
+        data = obj_get_props_dict(self)
         if params:
             data.update(params)
         return data
@@ -1371,14 +1371,6 @@ PARSERS = {c.NAME: c for c in [
 # UTILITIES
 ##
 
-def obj_as_dict(obj, pred: Callable[[str, Any], bool] = None) -> Dict[str, Any]:
-    params = {}
-    for name, val in inspect.getmembers(obj):
-        if pred and pred(name, val):
-            params[name] = val
-    return params
-
-
 def dict_serialize(obj, as_dict_skip: bool = False) -> Any:
     if obj is None or isinstance(obj, (str, int)):
         return obj
@@ -1400,10 +1392,128 @@ def dict_serialize(obj, as_dict_skip: bool = False) -> Any:
     if hasattr(obj, '__dict__'):
         return {k: dict_serialize(v) for k, v in obj.__dict__.items()}
 
-    if isinstance(obj, Path):
-        return str(obj)
-
     return str(obj)
+
+
+_KT = Union[str, List[str]]
+
+
+def dict_set(orig: Dict[str, Any], key: _KT, value: Any, sep: str = '.') -> Dict[str, Any]:
+    if not key:
+        return orig
+    orig = orig if orig is not None else {}
+    if isinstance(key, str):
+        key = key.split(sep)
+    current = orig
+    for idx, kpart in enumerate(key):
+        if idx == (len(key) - 1):
+            break
+        if current is None:
+            current = {kpart: {}}
+        if isinstance(current, dict):
+            part = current.get(kpart)
+            if part is None:
+                current[kpart] = {}
+        if isinstance(current, list):
+            kpart = int(kpart)
+            part = current[kpart]
+            if part is None:
+                current[kpart] = {}
+        current = current[kpart]
+    current[key[len(key) - 1]] = value
+    return orig
+
+
+def dict_get(orig: Dict[str, Any], key: _KT, sep: str = '.', default: Any = None) -> Optional[Any]:
+    if not orig:
+        return default
+
+    if not key:
+        return orig
+
+    if isinstance(key, str):
+        key = key.split(sep)
+
+    current = orig
+    for idx, kpart in enumerate(key):
+        if isinstance(current, dict):
+            if kpart not in current:
+                return default
+        if isinstance(current, list):
+            kpart = int(kpart)
+            if kpart >= len(current):
+                return default
+        current = current[kpart]
+    return current
+
+
+def dict_dump_dotted(orig: Any, prefix: str = '') -> List[Tuple[str, Any]]:
+    coll = None
+    if isinstance(orig, dict):
+        coll = orig.items()
+    if isinstance(orig, list):
+        coll = enumerate(orig)
+
+    if not coll or not orig:
+        return [(f'{prefix}', orig)]
+
+    buffer = []
+    for k, v in coll:
+        fk = f'{prefix}.{k}' if prefix else k
+        buffer += dict_dump_dotted(v, fk)
+    return buffer
+
+
+def dump_config(data, fmt: str = 'dot', nones=False):
+    if fmt in ('json', 'j'):
+        print(json.dumps(data, indent=2))
+    elif fmt in ('yml', 'y', 'yaml'):
+        import yaml
+        print(yaml.dump(data))
+    else:  # Dot format
+        for k, v in dict_dump_dotted(data):
+            if nones or v is not None:
+                print(f"{k}: {v}" if k else v)
+
+
+def dict_rec_subst(orig: Dict[str, Any], resolved=None) -> Dict[str, Any]:
+    resolved = resolved if resolved else {}
+    not_resolved = set(orig.keys())
+
+    while not_resolved:
+        cp = not_resolved.copy()
+        for k in cp:
+            if k not in not_resolved:
+                continue
+            v = orig[k]
+            if isinstance(v, dict):
+                not_resolved.remove(k)
+                resolved[k] = dict_rec_subst(v)
+            if not isinstance(v, str):
+                not_resolved.remove(k)
+                resolved[k] = v
+                continue
+            t = string.Template(v)
+            try:
+                resolved[k] = t.substitute(resolved)
+                not_resolved.remove(k)
+            except KeyError as e:
+                continue
+        if cp == not_resolved:
+            for nrk in not_resolved:
+                resolved[nrk] = orig[nrk]
+            break
+
+    return resolved
+
+
+def obj_get_props_dict(obj: object) -> Dict[str, Any]:
+    cls = obj.__class__
+    props = inspect.getmembers(cls, lambda o: isinstance(o, property))
+    res = {}
+    for name, prop in props:
+        res[name] = prop.fget(obj)
+    return res
 
 
 def dump_as_dict(dictionary, frm: str = 'json', indent: int = 4, **kwargs) -> str:
@@ -1562,7 +1672,7 @@ def to_bool(val: Any) -> bool:
         return False
 
     if isinstance(val, str):
-        return val.lower() in ('y', 'on', 'yes', 'enable')
+        return val.lower() in ('y', 'on', 'yes', 'enable', 'true', 't')
 
     return bool(val)
 
@@ -1860,21 +1970,6 @@ def _get_log_level(args):
     return log_level
 
 
-def parse_params_defs(defn: List[str]) -> Dict[str, Any]:
-    result = {}
-    for df in defn:
-        df = df.strip()
-        if not df:
-            continue
-        parts = df.split('=', maxsplit=1)
-        key = parts[0].strip()
-        val = True
-        if len(parts) == 2:
-            val = parse_param_value(parts[1])
-        result[key] = parse_param_value(val)
-    return result
-
-
 PARAM_CONVERTERS = {
     '@int': int,
     '@float': float,
@@ -1882,20 +1977,53 @@ PARAM_CONVERTERS = {
     '@path': Path,
 }
 
+DEFAULT_TCS: Dict[str, Callable[[str], Any]] = {
+    '@bool': to_bool,
+    '@path': Path,
+    '@int': int,
+    '@float': float,
+    '@none': lambda _: None,
+    '@true': lambda _: True,
+    '@false': lambda _: False,
+    '@id': lambda x: x[4:]
+}
 
-def parse_param_value(val: str) -> Any:
-    val = val.strip()
 
-    if not val.startswith('@'):
-        return val
+class ParamParser:
+    _DEFAULT = None
 
-    cvt = None
-    for key, converter in PARAM_CONVERTERS.items():
-        if val.startswith(key):
-            cvt = converter
-            break
+    @classmethod
+    def default(cls) -> 'ParamParser':
+        if cls._DEFAULT is None:
+            cls._DEFAULT = cls()
+        return cls._DEFAULT
 
-    return cvt(val) if cvt else val
+    def __init__(self, delim: str = ':', tcs: Dict[str, Callable[[str], Any]] = None):
+        self._delim: str = delim
+        self._tc: Dict[str, Callable[[str], Any]] = tcs if tcs else DEFAULT_TCS
+
+    def parse(self, params: List[str]) -> Dict[str, Any]:
+        result = {}
+        for param in params:
+            (key, val) = self._parse_param(param)
+            if not key:
+                continue
+            dict_set(result, key, val)
+        return result
+
+    def _parse_param(self, param: str) -> Tuple[str, Any]:
+        if not param:
+            return '', ''
+        parts = param.split(self._delim, maxsplit=1)
+        LOG.debug('[PARSE] Parse param "%s": %s', param, parts)
+        if len(parts) == 1:
+            return parts[0], True
+        k = parts[0].strip()
+        v = parts[1].strip()
+        for (name, func) in self._tc.items():
+            if v.startswith(name):
+                return k, func(v[len(name):].lstrip())
+        return k, v
 
 
 def _app_get_cfg(args: argparse.Namespace) -> 'RunParams':
@@ -1907,7 +2035,8 @@ def _app_get_cfg(args: argparse.Namespace) -> 'RunParams':
 
     defn = args.define
     if defn:
-        app_cfg.update(parse_params_defs(defn))
+        parser = ParamParser.default()
+        app_cfg.update(parser.parse(defn))
 
     app_cfg['diff_params'] = shlex.split(app_cfg.get('diff_params', ''))
     params = RunParams(app_cfg)
