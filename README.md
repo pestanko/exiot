@@ -94,6 +94,8 @@ Run Mini Homeworks:
 python -m exiot -Linfo exec -p minihw <PATH_TO_MINIHW>
 # Example:
 python -m exiot -Linfo exec -p minihw examples/minihw_not_impl
+# Example to run the solution
+python -m exiot -Linfo exec -D="target: solution" <PATH_TO_MINIHW>
 ```
 
 ## Supported execution parameters
@@ -107,6 +109,7 @@ using: `-D` or `--define` option.
 - `devel_mode` - Enable development mode, only for test development, not for "production"
 - `target` - for minihw you can toggle between `source|solution` executable testing (default: `source`)
 - `diff_params` - `diff` executable additional params
+- `junit_dump` - Print out the JUNIT dump at the end of the execution
 
 ## Examples
 

@@ -28,7 +28,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Union, Set, TypeVar, Type, Mapping, Callable
+from typing import Any, Dict, Optional, List, Union, Set, TypeVar, Type, Mapping, Callable, Tuple
 
 ##
 # Global Definitions
@@ -71,7 +71,7 @@ class AsDict:
     """
 
     def as_dict(self, params: Dict = None) -> Dict:
-        data = obj_as_dict(self, lambda n, v: not callable(v) and not n.startswith("_"))
+        data = obj_get_props_dict(self)
         if params:
             data.update(params)
         return data
@@ -448,7 +448,7 @@ class ProjectResult(RunResult):
 
     def find_suite(self, sel: str) -> Optional['SuiteResult']:
         for item in self.suites:
-            if item.df.id == self or item.df.name == sel:
+            if item.df.id == sel or item.df.name == sel:
                 return item
         return None
 
@@ -460,7 +460,7 @@ class SuiteResult(RunResult):
 
     def find_test(self, sel: str) -> Optional['TestResult']:
         for test in self.tests:
-            if test.df.id == self or test.df.name == sel:
+            if test.df.id == sel or test.df.name == sel:
                 return test
         return None
 
@@ -892,29 +892,27 @@ class FileValidation(GeneralAction):
         exp = self.params.get('expected', {'empty': True})
         return self._resolve_dict(exp, provided)
 
+    def _resolve_file_size(self, exp: Dict) -> str:
+        empty = exp.get('empty')
+        if empty is not None:
+            return '== 0' if empty else '!= 0'
+
+        size = exp.get('size')
+        return f'== {int(size)}' if size is not None else None
+
     def _resolve_dict(self, exp: Dict, provided: Path):
         if exp.get('any'):
             return self._make_pass('Not checking file content')
 
-        empty = exp.get('empty')
-        if empty is not None:
-            if empty:
-                return self._compare_file_size(provided, expr=' == 0')
-            return self._compare_file_size(provided, expr=' != 0')
-
-        size = exp.get('size')
-        if size is not None:
-            return self._compare_file_size(provided, expr=f' == {int(size)}')
+        size_expr = self._resolve_file_size(exp)
+        if size_expr is not None:
+            return self._compare_file_size(provided, expr=size_expr)
 
         match = exp.get('match')
         if match is not None:
             return self._match_file_content(provided, pattern=match)
 
-        base64content = exp.get('base64')
-        if base64content is not None:
-            content = base64.b64decode(base64content)
-        else:
-            content = exp.get('content')
+        content = self._resolve_raw_file_content(exp)
 
         if content is not None:
             fp = self._make_expected_output(content)
@@ -924,6 +922,12 @@ class FileValidation(GeneralAction):
         if fp:
             return self._compare_file_content(provided, exp=Path(fp))
         return None
+
+    def _resolve_raw_file_content(self, exp: Dict[str, Any]) -> str:
+        b64cont = exp.get('base64', exp.get('b64'))
+        if b64cont is not None:
+            return base64.b64decode(b64cont).decode('utf-8')
+        return exp.get('content', exp.get('text'))
 
     def _compare_file_size(self, provided: Path, expr: str):
         provided_size = os.path.getsize(str(provided))
@@ -940,7 +944,7 @@ class FileValidation(GeneralAction):
 
     def _compare_file_content(self, provided: Path, exp: Path) -> 'ActionResult':
         exp = self.ctx.resolve_data_file(exp)
-        diff_params: List['str'] = self.ctx.params.get('diff_params', [])
+        diff_params: List[str] = self.ctx.params.get('diff_params', [])
         diff_params.append('--strip-trailing-cr')
         diff_exec = execute_cmd(
             'diff',
@@ -948,17 +952,18 @@ class FileValidation(GeneralAction):
             ws=self.ctx.ws(),
             nm=f"diff-{self.ctx.nm.current}"
         )
+        detail = {
+            'expected': str(exp),
+            'provided': str(provided),
+            'diff': str(diff_exec.stdout),
+            'diff_exit': diff_exec.exit,
+            'additional': diff_exec.as_dict(),
+            '_verbose': lambda s: _verbose_wrap('DIFF', _trunc_read(diff_exec.stdout, s))
+        }
         return self._make_result(
             diff_exec.exit == 0,
             msg="Files content is not a same!",
-            detail={
-                'expected': str(exp),
-                'provided': str(provided),
-                'diff': str(diff_exec.stdout),
-                'diff_exit': diff_exec.exit,
-                'additional': diff_exec.as_dict(),
-                '_verbose': lambda s: _verbose_wrap('DIFF', _trunc_read(diff_exec.stdout, s))
-            }
+            detail=detail
         )
 
     def _get_by_selector(self) -> Path:
@@ -1144,7 +1149,12 @@ class DirectoryTestsParser(DefinitionParser):
         stage = _parse_lines(_resolve_file(folder, name, ext='stage'))
         if stage:
             self.log.debug("[PARSE] Test '%s' files to stage: %s", name, stage)
-        test = TestDf(name=name, desc=f"Test {name}", action=action, stage=stage)
+        test = TestDf(
+            name=name,
+            desc=f"Test Case '{name}' for '{folder.name}'",
+            action=action,
+            stage=stage
+        )
         validations = self._parse_validations(folder, name)
         test.add_validation(*validations)
         return test
@@ -1256,10 +1266,10 @@ class FileScenarioDefParser(DefinitionParser):
         suites = []
         for suite_file in suite_files:
             LOG.info("[PARSE] Suite File: '%s'", suite_file)
-            sfd = load_def_file(suite_file)
-            if not sfd or 'suite' not in sfd:
+            suite_def = load_def_file(suite_file)
+            if not suite_def or 'suite' not in suite_def:
                 continue
-            suite = self.parse_suite(project, sfd)
+            suite = self.parse_suite(project, suite_def)
             if suite:
                 suites.append(suite)
 
@@ -1289,7 +1299,7 @@ class FileScenarioDefParser(DefinitionParser):
             self.parse_test(suite, test_def)
         return suite
 
-    def parse_test(self, suite: SuiteDf, tdf: Dict[str, Any]):
+    def parse_test(self, suite: SuiteDf, tdf: Dict[str, Any]) -> 'TestDf':
         params = tdf.get('params', {})
         test = TestDf(
             name=tdf['name'],
@@ -1303,6 +1313,7 @@ class FileScenarioDefParser(DefinitionParser):
             test.add_validation(self._parse_explicit_action(val))
         self._add_default_validations(tdf, test)
         suite.add_test(test)
+        return test
 
     def _add_default_validations(self, test_d, test: 'TestDf'):
         test.add_validation(
@@ -1371,14 +1382,6 @@ PARSERS = {c.NAME: c for c in [
 # UTILITIES
 ##
 
-def obj_as_dict(obj, pred: Callable[[str, Any], bool] = None) -> Dict[str, Any]:
-    params = {}
-    for name, val in inspect.getmembers(obj):
-        if pred and pred(name, val):
-            params[name] = val
-    return params
-
-
 def dict_serialize(obj, as_dict_skip: bool = False) -> Any:
     if obj is None or isinstance(obj, (str, int)):
         return obj
@@ -1400,10 +1403,128 @@ def dict_serialize(obj, as_dict_skip: bool = False) -> Any:
     if hasattr(obj, '__dict__'):
         return {k: dict_serialize(v) for k, v in obj.__dict__.items()}
 
-    if isinstance(obj, Path):
-        return str(obj)
-
     return str(obj)
+
+
+_KT = Union[str, List[str]]
+
+
+def dict_set(orig: Dict[str, Any], key: _KT, value: Any, sep: str = '.') -> Dict[str, Any]:
+    if not key:
+        return orig
+    orig = orig if orig is not None else {}
+    if isinstance(key, str):
+        key = key.split(sep)
+    current = orig
+    for idx, kpart in enumerate(key):
+        if idx == (len(key) - 1):
+            break
+        if current is None:
+            current = {kpart: {}}
+        if isinstance(current, dict):
+            part = current.get(kpart)
+            if part is None:
+                current[kpart] = {}
+        if isinstance(current, list):
+            kpart = int(kpart)
+            part = current[kpart]
+            if part is None:
+                current[kpart] = {}
+        current = current[kpart]
+    current[key[len(key) - 1]] = value
+    return orig
+
+
+def dict_get(orig: Dict[str, Any], key: _KT, sep: str = '.', default: Any = None) -> Optional[Any]:
+    if not orig:
+        return default
+
+    if not key:
+        return orig
+
+    if isinstance(key, str):
+        key = key.split(sep)
+
+    current = orig
+    for idx, kpart in enumerate(key):
+        if isinstance(current, dict):
+            if kpart not in current:
+                return default
+        if isinstance(current, list):
+            kpart = int(kpart)
+            if kpart >= len(current):
+                return default
+        current = current[kpart]
+    return current
+
+
+def dict_dump_dotted(orig: Any, prefix: str = '') -> List[Tuple[str, Any]]:
+    coll = None
+    if isinstance(orig, dict):
+        coll = orig.items()
+    if isinstance(orig, list):
+        coll = enumerate(orig)
+
+    if not coll or not orig:
+        return [(f'{prefix}', orig)]
+
+    buffer = []
+    for k, v in coll:
+        fk = f'{prefix}.{k}' if prefix else k
+        buffer += dict_dump_dotted(v, fk)
+    return buffer
+
+
+def dump_config(data, fmt: str = 'dot', nones=False):
+    if fmt in ('json', 'j'):
+        print(json.dumps(data, indent=2))
+    elif fmt in ('yml', 'y', 'yaml'):
+        import yaml
+        print(yaml.dump(data))
+    else:  # Dot format
+        for k, v in dict_dump_dotted(data):
+            if nones or v is not None:
+                print(f"{k}: {v}" if k else v)
+
+
+def dict_rec_subst(orig: Dict[str, Any], resolved=None) -> Dict[str, Any]:
+    resolved = resolved if resolved else {}
+    not_resolved = set(orig.keys())
+
+    while not_resolved:
+        cp = not_resolved.copy()
+        for k in cp:
+            if k not in not_resolved:
+                continue
+            v = orig[k]
+            if isinstance(v, dict):
+                not_resolved.remove(k)
+                resolved[k] = dict_rec_subst(v)
+            if not isinstance(v, str):
+                not_resolved.remove(k)
+                resolved[k] = v
+                continue
+            t = string.Template(v)
+            try:
+                resolved[k] = t.substitute(resolved)
+                not_resolved.remove(k)
+            except KeyError:
+                continue
+        if cp == not_resolved:
+            for nrk in not_resolved:
+                resolved[nrk] = orig[nrk]
+            break
+
+    return resolved
+
+
+def obj_get_props_dict(obj: object) -> Dict[str, Any]:
+    cls = obj.__class__
+    props = inspect.getmembers(cls, lambda o: isinstance(o, property))
+    res = {}
+    for name, prop in props:
+        res[name] = prop.fget(obj)
+    return res
 
 
 def dump_as_dict(dictionary, frm: str = 'json', indent: int = 4, **kwargs) -> str:
@@ -1562,7 +1683,7 @@ def to_bool(val: Any) -> bool:
         return False
 
     if isinstance(val, str):
-        return val.lower() in ('y', 'on', 'yes', 'enable')
+        return val.lower() in ('y', 'on', 'yes', 'enable', 'true', 't')
 
     return bool(val)
 
@@ -1683,90 +1804,126 @@ def print_project_df(pdf: 'ProjectDf', colors: bool = True):
         print()
 
 
-def print_project_result(p_res: 'ProjectResult', with_actions: bool = False,
-                         colors: bool = True, verbose_size: int = 0):
-    term_col = TColors(colors)
+class Reporter:
+    def __init__(self, cfg: 'RunParams'):
+        self.cfg: 'RunParams' = cfg
 
-    def _prk(res: 'RunResultType'):
-        color = term_col.RED if res.kind.is_fail() else term_col.GREEN
-        return term_col.wrap(color, f"[{res.kind.value.upper()}]")
-
-    def _p(res: 'RunResultType', kind: str):
-        line = f"{_prk(res)} {kind.capitalize()}: " \
-               f"({res.df.name}) :: {res.df.desc}"
-        if isinstance(res, RunResult):
-            line += f" (All: {res.n_subs}; Failed: {res.n_failed}; " \
-                    f"Passed: {res.n_passed}; Skipped: {res.n_skipped})"
-        return line
-
-    print(_p(p_res, 'Project'))
-    for s_res in p_res.suites:
-        print(">>>", _p(s_res, 'Suite'))
-        for t_res in s_res.tests:
-            print(f"\t - {_p(t_res, 'Test')} ")
-            if t_res.is_fail():
-                if t_res.msg:
-                    print(f"\t\t Message: {t_res.msg}")
-            pad = "\t\t*"
-            for pre_cond in t_res.preconditions:
-                if not pre_cond.is_ok() or with_actions:
-                    print(f"{pad} {_p(pre_cond, 'Pre-condition')}")
-            if t_res.main_action.is_fail() or with_actions:
-                print(f"{pad} {_p(t_res.main_action, 'Main')}")
-            for act_res in t_res.actions:
-                if not act_res.is_ok() or with_actions:
-                    print(f"{pad} {_p(act_res, 'Validate')}")
-
-                if act_res.kind.is_pass():
-                    continue
-
-                print(act_res.fail_msg("\t\t  [info] "))
-                if verbose_size:
-                    vrb = act_res.verbose(verbose_size)
-                    if vrb:
-                        print(vrb)
-        print()
-
-    print(f"\nOVERALL RESULT: {_prk(p_res)}\n")
+    @abc.abstractmethod
+    def report(self, res: 'ProjectResult', **kwargs) -> Optional[Path]:
+        pass
 
 
-def dump_junit_report(p_res: 'ProjectResult', ws_root: Path,
-                      report_name: str = 'junit_report') -> Optional[Path]:
-    try:
-        import junitparser
-    except ImportError:
-        LOG.warning("No JUNIT generated - junit parser is not installed")
+class ConsoleReporter(Reporter):
+    def __init__(self, cfg: 'RunParams'):
+        super().__init__(cfg)
+        self.tcol: TColors = TColors(not cfg.get('no_color', False))
+
+    def _prk(self, r: 'RunResultType') -> str:
+        color = self.tcol.RED if r.kind.is_fail() else self.tcol.GREEN
+        return self.tcol.wrap(color, f"[{r.kind.value.upper()}]")
+
+    def report(self,
+               res: 'ProjectResult',
+               with_actions: bool = False,
+               verbose_size: int = 0,
+               **kwargs) -> Optional[Path]:
+
+        def _p(r: 'RunResultType', kind: str):
+            line = f"{self._prk(r)} {kind.capitalize()}: " \
+                   f"({r.df.name}) :: {r.df.desc}"
+            if isinstance(r, RunResult):
+                line += f" (All: {r.n_subs}; Failed: {r.n_failed}; " \
+                        f"Passed: {r.n_passed}; Skipped: {r.n_skipped})"
+            return line
+
+        def _echo(*args, **kw):
+            print(*args, **kw)
+
+        _echo(_p(res, 'Project'))
+        for s_res in res.suites:
+            _echo(">>>", _p(s_res, 'Suite'))
+            for t_res in s_res.tests:
+                _echo(f"\t - {_p(t_res, 'Test')} ")
+                if t_res.is_fail():
+                    if t_res.msg:
+                        _echo(f"\t\t Message: {t_res.msg}")
+                pad = "\t\t*"
+                for pre_cond in t_res.preconditions:
+                    if not pre_cond.is_ok() or with_actions:
+                        _echo(f"{pad} {_p(pre_cond, 'Pre-condition')}")
+                if t_res.main_action.is_fail() or with_actions:
+                    _echo(f"{pad} {_p(t_res.main_action, 'Main')}")
+                for act_res in t_res.actions:
+                    if not act_res.is_ok() or with_actions:
+                        _echo(f"{pad} {_p(act_res, 'Validate')}")
+
+                    if act_res.kind.is_pass():
+                        continue
+
+                    _echo(act_res.fail_msg("\t\t  [info] "))
+                    if verbose_size:
+                        vrb = act_res.verbose(verbose_size)
+                        if vrb:
+                            _echo(vrb)
+            _echo()
+
+        _echo(f"\nOVERALL RESULT: {self._prk(res)}\n")
         return None
-    report_dir = ws_root / p_res.df.id
-    if not report_dir.exists():
-        report_dir.mkdir(parents=True)
-    report_path = report_dir / f'{report_name}.xml'
-    LOG.info("[REPORT] Generating JUNIT report: %s", report_path)
-    junit_suites = junitparser.JUnitXml(p_res.df.name)
-    for s_res in p_res.suites:
-        unit_suite = junitparser.TestSuite(name=s_res.df.name)
-        for test_res in s_res.tests:
-            junit_case = junitparser.TestCase(
-                name=test_res.df.desc,
-                classname=p_res.df.id + '/' + s_res.df.id,
-                time=test_res.cmd_res.elapsed / 1000000.0 if test_res.cmd_res else 0
-            )
-            unit_suite.add_testcase(junit_case)
-            if test_res.kind.is_pass():
-                continue
-            fails = []
-            for act in test_res.actions:
-                fail = junitparser.Failure(act.msg)
-                fail.text = "\n" + act.fail_msg()
-                fails.append(fail)
-            junit_case.result = fails
-            if test_res.cmd_res:
-                junit_case.system_out = str(test_res.cmd_res.stdout)
-                junit_case.system_err = str(test_res.cmd_res.stderr)
-        junit_suites.add_testsuite(unit_suite)
 
-    junit_suites.write(str(report_path))
-    return report_path
+
+class JUnitReporter(Reporter):
+    def report(self,
+               res: 'ProjectResult',
+               report_name: str = 'junit_report',
+               **kwargs) -> Optional[Path]:
+        try:
+            import junitparser
+        except ImportError:
+            LOG.warning("No JUNIT generated - junit parser is not installed")
+            return None
+        report_path = self._make_report_path(res.df.id, report_name=report_name)
+        LOG.info("[REPORT] Generating JUNIT report: %s", report_path)
+        junit_suites = junitparser.JUnitXml(res.df.name)
+        for s_res in res.suites:
+            unit_suite = junitparser.TestSuite(name=s_res.df.name)
+            for test_res in s_res.tests:
+                junit_case = self.__make_junit_case(test_res)
+                unit_suite.add_testcase(junit_case)
+            junit_suites.add_testsuite(unit_suite)
+
+        junit_suites.write(str(report_path))
+        return report_path
+
+    @classmethod
+    def __make_junit_case(cls, test_res: 'TestResult'):
+        import junitparser  # This will always succeed
+        jcase = junitparser.TestCase(
+            name=test_res.df.desc,
+            classname=test_res.df.nm.str(),
+            time=test_res.cmd_res.elapsed / 1000000.0 if test_res.cmd_res else 0
+        )
+        if test_res.kind.is_pass():
+            return jcase
+
+        jcase.result = [cls._make_tc_fail(act) for act in test_res.actions]
+        if test_res.cmd_res:
+            jcase.system_out = str(test_res.cmd_res.stdout)
+            jcase.system_err = str(test_res.cmd_res.stderr)
+        return jcase
+
+    @classmethod
+    def _make_tc_fail(cls, act):
+        import junitparser  # This will always succeed
+        fail = junitparser.Failure(act.msg)
+        fail.text = "\n" + act.fail_msg()
+        return fail
+
+    def _make_report_path(self, project_id: str, report_name: str):
+        report_dir = self.cfg.ws / project_id
+        if not report_dir.exists():
+            report_dir.mkdir(parents=True)
+        report_path = report_dir / f'{report_name}.xml'
+        return report_path
 
 
 def cli_parse(args: argparse.Namespace):
@@ -1782,18 +1939,26 @@ def cli_parse(args: argparse.Namespace):
 def cli_exec(args: argparse.Namespace):
     cfg = _app_get_cfg(args)
     project_df = _app_parse_project(cfg, args)
+    if project_df is None:
+        raise AssertionError("No project definition found in test dir: ", cfg.tests_dir)
     runner = ProjectRunner(cfg, project=project_df)
     result = runner.run()
     with_actions = args.with_actions
-    colors = not args.no_color
-    print_project_result(result, with_actions=with_actions, colors=colors)
-    report = dump_junit_report(
+    cons_rep = ConsoleReporter(cfg)
+    cons_rep.report(result, with_actions=with_actions)
+    junit_reporter = JUnitReporter(cfg)
+    report = junit_reporter.report(
         result,
-        ws_root=cfg.ws,
-        report_name=f'report_{project_df.id}.xml'
+        report_name=f'report_{project_df.id}'
     )
     if report:
         print("JUNIT REPORT:", report)
+        if cfg.get('junit_dump', False):
+            try:
+                print("\nJUNIT REPORT CONTENT: \n")
+                print(pretty_print_xml(report))
+            except Exception as ex:
+                LOG.error("Unable to pretty print XML JUnit Report: ", ex)
 
     return result.is_pass()
 
@@ -1812,8 +1977,8 @@ def make_cli_parser() -> argparse.ArgumentParser:
         sub.add_argument('-p', '--parser', type=str,
                          help=f'Use specific parser ({parser_names}), default is "auto"',
                          default=None)
-        sub.add_argument('-D', '--define', action='append', nargs='*',
-                         help='Define/override parameter (format: \'-D "var=value"\')')
+        sub.add_argument('-D', '--define', action='append',
+                         help='Define/override parameter (format: \'-D "var:value"\')')
         sub.add_argument('--no-color', action='store_true', default=False,
                          help='Print output without color')
         sub.add_argument('tests', type=str, help='Test files location')
@@ -1847,10 +2012,21 @@ def main(args: Optional[List['str']] = None) -> int:
         parser.print_help()
         return 0
 
-    if not args.func(args):
-        print("\nExecution failed!")
-        return 1
-    return 0
+    try:
+        if not args.func(args):
+            print("\nExecution failed!")
+            return 1
+        return 0
+    except Exception as e:
+        print(f"\nExecution Failed: {e}", file=sys.stderr)
+        return 2
+
+
+def pretty_print_xml(path: Path) -> str:
+    import xml.dom.minidom
+
+    dom = xml.dom.minidom.parse(str(path))
+    return dom.toprettyxml()
 
 
 def _get_log_level(args):
@@ -1860,54 +2036,72 @@ def _get_log_level(args):
     return log_level
 
 
-def parse_params_defs(defn: List[str]) -> Dict[str, Any]:
-    result = {}
-    for df in defn:
-        df = df.strip()
-        if not df:
-            continue
-        parts = df.split('=', maxsplit=1)
-        key = parts[0].strip()
-        val = True
-        if len(parts) == 2:
-            val = parse_param_value(parts[1])
-        result[key] = parse_param_value(val)
-    return result
-
-
-PARAM_CONVERTERS = {
-    '@int': int,
-    '@float': float,
+DEFAULT_TCS: Dict[str, Callable[[str], Any]] = {
     '@bool': to_bool,
     '@path': Path,
+    '@int': int,
+    '@float': float,
+    '@none': lambda _: None,
+    '@true': lambda _: True,
+    '@false': lambda _: False,
+    '@id': lambda x: x[4:]
 }
 
 
-def parse_param_value(val: str) -> Any:
-    val = val.strip()
+class ParamParser:
+    _DEFAULT = None
 
-    if not val.startswith('@'):
+    @classmethod
+    def default(cls) -> 'ParamParser':
+        if cls._DEFAULT is None:
+            cls._DEFAULT = cls()
+        return cls._DEFAULT
+
+    def __init__(self, delim: str = ':', tcs: Dict[str, Callable[[str], Any]] = None):
+        self._delim: str = delim
+        self._tc: Dict[str, Callable[[str], Any]] = tcs if tcs else DEFAULT_TCS
+
+    def parse(self, params: List[str]) -> Dict[str, Any]:
+        result = {}
+        for param in params:
+            (key, val) = self._parse_param(param)
+            if not key:
+                continue
+            dict_set(result, key, val)
+        return result
+
+    def _parse_param(self, param: str) -> Tuple[str, Any]:
+        if not param:
+            return '', ''
+        parts = param.split(self._delim, maxsplit=1)
+        LOG.debug('[PARSE] Parse param "%s": %s', param, parts)
+        key = parts[0].strip()
+
+        val = self.parse_value(parts[1].strip() if len(parts) > 1 else None)
+        return key, val
+
+    def parse_value(self, val: str) -> Any:
+        if not val:
+            return True
+        for (cvt_name, fn) in self._tc.items():
+            if val.startswith(cvt_name):
+                return fn(val[len(cvt_name):].lstrip())
         return val
-
-    cvt = None
-    for key, converter in PARAM_CONVERTERS.items():
-        if val.startswith(key):
-            cvt = converter
-            break
-
-    return cvt(val) if cvt else val
 
 
 def _app_get_cfg(args: argparse.Namespace) -> 'RunParams':
     app_cfg = dict(
         tests_dir=args.tests,
         executable=args.executable,
-        ws=args.workspace
+        ws=args.workspace,
+        no_color=args.no_color
     )
 
+    app_cfg.update(_parse_environ_params('EX'))
     defn = args.define
     if defn:
-        app_cfg.update(parse_params_defs(defn))
+        parser = ParamParser.default()
+        app_cfg.update(parser.parse(defn))
 
     app_cfg['diff_params'] = shlex.split(app_cfg.get('diff_params', ''))
     params = RunParams(app_cfg)
@@ -1918,6 +2112,17 @@ def _app_get_cfg(args: argparse.Namespace) -> 'RunParams':
     LOG.info("[PATHS] Test dir: %s", params.tests_dir)
     LOG.info("[PATHS] Workspace: %s", params.ws)
     return params
+
+
+def _parse_environ_params(prefix: str = '') -> Dict[str, Any]:
+    parser = ParamParser.default()
+    prefix = f"{prefix}_" if prefix else ''
+    result = {}
+    for key, val in os.environ.items():
+        if key.startswith(prefix):
+            name = key[len(prefix):].lower()
+            result[name] = parser.parse_value(val)
+    return result
 
 
 def _app_parse_project(cfg: RunParams, args) -> Optional[ProjectDf]:

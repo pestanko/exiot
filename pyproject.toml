@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "exiot"
-version = "0.0.1-alpha.4"
+version = "0.1.0"
 description = "The 'exiot' is a testing tool to test the executable STDIN, STDOUT, STDERR, and many more."
 authors = [
     "Peter Stanko <peter.stanko0@gmail.com>"
@@ -22,6 +22,7 @@ PyYAML = "^5.4.1"
 [tool.poetry.dev-dependencies]
 pytest = "^6"
 pytest-cov = "^2.12.1"
+coverage = "^6.0.2"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

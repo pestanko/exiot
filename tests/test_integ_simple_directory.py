@@ -48,5 +48,5 @@ def test_directory_run(run_params):
     project = parser.parse()
 
     result = exiot.ProjectRunner(run_params, project).run()
-    exiot.print_project_result(result)
+    exiot.ConsoleReporter(run_params).report(result)
     assert result.is_pass()
