@@ -94,6 +94,8 @@ Run Mini Homeworks:
 python -m exiot -Linfo exec -p minihw <PATH_TO_MINIHW>
 # Example:
 python -m exiot -Linfo exec -p minihw examples/minihw_not_impl
+# Example to run the solution
+python -m exiot -Linfo exec -D="target: solution" <PATH_TO_MINIHW>
 ```
 
 ## Supported execution parameters
