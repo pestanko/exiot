@@ -8,6 +8,17 @@ You can take a look to the (man/architecture.md)[Architecture] `man` documentati
 
 ## Getting Started
 
+This tool requires [unix's ``diff``](https://man7.org/linux/man-pages/man1/diff.1.html) - to compare file's content.
+
+If you would like to use the ``--build=cmake`` you would need: [`cmake`](https://cmake.org/),
+[`make`](https://man7.org/linux/man-pages/man1/make.1.html) and
+[`gcc`](https://gcc.gnu.org/) or [`clang`](https://clang.llvm.org/)
+
+In order to use this tool on MS Windows, you need to use the [`wsl`](https://docs.microsoft.com/en-us/windows/wsl/install).
+
+
+### Installation
+
 In order to install the latest "stable" version of the tool you can use
 the [pip](https://packaging.python.org/tutorials/installing-packages/).
 

@@ -14,6 +14,7 @@ import base64
 import collections.abc
 import copy
 import enum
+import filecmp
 import inspect
 import json
 import logging
@@ -1001,6 +1002,12 @@ class FileValidation(GeneralAction):
         })
 
     def _compare_file_content(self, provided: Path, exp: Path) -> 'ActionResult':
+        if shutil.which('diff') is not None:
+            return self._compare_file_content_diff(provided, exp)
+
+        return self._compare_file_content_python(provided, exp)
+
+    def _compare_file_content_diff(self, provided: Path, exp: Path) -> 'ActionResult':
         exp = self.ctx.resolve_data_file(exp)
         diff_params: List[str] = self.ctx.params.get('diff_params', [])
         diff_params.append('--strip-trailing-cr')
@@ -1020,6 +1027,20 @@ class FileValidation(GeneralAction):
         }
         return self._make_result(
             diff_exec.exit == 0,
+            msg="Files content is not a same!",
+            detail=detail
+        )
+
+    def _compare_file_content_python(self, provided: Path, exp: Path):
+        # TODO use https://docs.python.org/3/library/difflib.html#module-difflib
+        res = filecmp.cmp(str(exp), str(provided), shallow=False)
+        detail = {
+            'expected': str(exp),
+            'provided': str(provided),
+            'same': res,
+        }
+        return self._make_result(
+            res,
             msg="Files content is not a same!",
             detail=detail
         )
