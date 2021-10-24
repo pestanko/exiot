@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "exiot"
-version = "0.1.0"
+version = "0.1.1"
 description = "The 'exiot' is a testing tool to test the executable STDIN, STDOUT, STDERR, and many more."
 authors = [
     "Peter Stanko <peter.stanko0@gmail.com>"
