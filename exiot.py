@@ -14,6 +14,7 @@ import base64
 import collections.abc
 import copy
 import enum
+import filecmp
 import inspect
 import json
 import logging
@@ -55,7 +56,7 @@ logging.addLevelName(TRACE, 'TRACE')
 
 
 def log_trace(self, msg, *args, **kwargs):
-    self.log(TRACE, msg, args, **kwargs)
+    self.log(TRACE, msg, *args, **kwargs)
 
 
 logging.Logger.trace = log_trace
@@ -98,6 +99,7 @@ class RunParams(AsDict):
             'timeout': data.get('timeout', 10),
             'valgrind': to_bool(data.get('valgrind', False)),
             'devel_mode': to_bool(data.get('devel_mode', False)),
+            'build': data.get('build', 'none')  # Possible values: cmake|auto|none
         })
         self.raw = data
 
@@ -127,6 +129,10 @@ class RunParams(AsDict):
     @property
     def devel_mode(self) -> bool:
         return to_bool(self.get('devel_mode', False))
+
+    @property
+    def build(self) -> str:
+        return self.get('build', 'none')
 
     def get(self, key: str, default: Any = None) -> Any:
         return self.raw.get(key, default)
@@ -183,6 +189,16 @@ class _EntityDf(AsDict):
         self.params: DParams = params or {}
         self._parent: Optional[EntityDfType] = parent
         self._namespace = None
+        self._preconditions: List['ActionDf'] = []
+
+    @property
+    def preconditions(self) -> List['ActionDf']:
+        return self._preconditions
+
+    def add_precondition(self, *preconditions):
+        for cond in preconditions:
+            cond.parent = self
+            self._preconditions.append(cond)
 
     @property
     def kind(self) -> str:
@@ -285,7 +301,6 @@ class TestDf(_EntityDf):
     def __init__(self, name: str, desc: str, params: DParams = None, stage: List[str] = None,
                  action: 'ActionDf' = None, parent: Optional[EntityDfType] = None):
         super().__init__(name, desc, params, parent)
-        self._preconditions: List['ActionDf'] = []
         self._stage = stage or []
         self._validations: List['ActionDf'] = []
         self._action: Optional['ActionDf'] = None
@@ -307,15 +322,6 @@ class TestDf(_EntityDf):
     def action(self, act: 'ActionDf'):
         act.parent = self
         self._action = act
-
-    @property
-    def preconditions(self) -> List['ActionDf']:
-        return self._preconditions
-
-    def add_precondition(self, *preconditions):
-        for cond in preconditions:
-            cond.parent = self
-            self._preconditions.append(cond)
 
     @property
     def validations(self) -> List['ActionDf']:
@@ -409,9 +415,13 @@ class RunResult(_RunResultBase):
         self.sub_results: List['RunResultType'] = []
 
     def add_result(self, res: 'RunResultType') -> None:
-        if self.is_pass() and res.is_fail():
+        if self.is_ok() and res.is_fail():
             self.kind = ResultKind.FAIL
             self.msg = "One of the sub-results has failed"
+        if self.is_ok() and res.is_skip():
+            self.msg = "One of the sub-items has been skipped"
+            if self.n_passed == 0:
+                self.kind = ResultKind.SKIP
         self.sub_results.append(res)
 
     def add_precondition(self, res: 'ActionResult') -> None:
@@ -494,6 +504,10 @@ class ActionResult(_RunResultBase):
     @classmethod
     def make_pass(cls, msg: str, df: 'ActionDf', detail: Any = None):
         return ActionResult(kind=ResultKind.PASS, msg=msg, df=df, detail=detail)
+
+    @classmethod
+    def make_skip(cls, msg: str, df: 'ActionDf', detail: Any = None):
+        return ActionResult(kind=ResultKind.SKIP, msg=msg, df=df, detail=detail)
 
     def fail_msg(self, fill: str = "") -> str:
         result = ""
@@ -643,14 +657,23 @@ class RunCtx:
 
 
 class ProjectRunner:
-    def __init__(self, app_params: 'RunParams', project: ProjectDf):
-        self.run_params = app_params
+    def __init__(self, cfg: 'RunParams', project: ProjectDf):
+        self.cfg = cfg
         self.df = project
 
     def run(self) -> 'ProjectResult':
-        ctx = RunCtx.make_new(self.df, params=self.run_params)
+        ctx = RunCtx.make_new(self.df, params=self.cfg)
         LOG.info("[RUN] Project: '%s'", ctx.nm)
-        result = ctx.make_result()
+        result: 'ProjectResult' = ctx.make_result()
+        self._resolve_build(ctx)
+
+        for pre in self.df.preconditions:
+            pc_res = _run_action(ctx, pre, cmd_res=None)
+            result.add_precondition(pc_res)
+
+        if not result.is_ok():
+            LOG.warning("Skipping - preconditions has failed")
+            return result
 
         for suite in self.df.suites:
             suite_runner = SuiteRunner(suite=suite, project_ctx=ctx)
@@ -659,6 +682,24 @@ class ProjectRunner:
             result.add_result(suite_res)
 
         return result
+
+    def _resolve_build(self, ctx: 'RunCtx'):
+        if ctx.params.build == 'none':
+            return
+
+        if ctx.params.build == 'auto':
+            if (ctx.tests_dir / 'CMakeLists.txt').exists():
+                self._resolve_cmake_build(ctx)
+            return None
+        if ctx.params.build == 'cmake':
+            self._resolve_cmake_build(ctx)
+
+    def _resolve_cmake_build(self, ctx: 'RunCtx'):
+        build_dir = BuildAction.resolve_build_dir(ctx.tests_dir)
+        cmake_args = {'args': ['-B', str(build_dir), '-S', str(ctx.tests_dir)]}
+        make_args = {'args': ['-k', '-C', str(build_dir)]}
+        self.df.add_precondition(CMakeBuildAction.make_df(cmake_args))
+        self.df.add_precondition(MakeBuildAction.make_df(make_args))
 
 
 class SuiteRunner:
@@ -671,6 +712,15 @@ class SuiteRunner:
         LOG.info("[RUN] Suite: '%s'", ctx.nm)
         result = ctx.make_result()
         ctx.stage_files(self.df.stage)
+
+        for pre in self.df.preconditions:
+            pc_res = _run_action(ctx, pre, cmd_res=None)
+            result.add_precondition(pc_res)
+
+        if not result.is_ok():
+            LOG.warning("Skipping - preconditions has failed")
+            return result
+
         for test in self.df.tests:
             test_runner = TestRunner(ctx, test)
             test_result = test_runner.run()
@@ -722,6 +772,9 @@ def _run_action(ctx: 'RunCtx', action_df: 'ActionDf', cmd_res=None) -> 'ActionRe
         LOG.error("[RUN] Unable to find action: '%s'", action_df.id)
         return ActionResult.make_fail(f"Unable to find action: {action_df.id}", df=action_df)
     try:
+        if ctx.params.get('dry_run'):
+            LOG.info("[RUN] DRY RUN: Executed '%s' for '%s'", action_df.id, action_df.parent.nm.str())
+            return ActionResult.make_skip("Action executed in dry run mode", df=action_df)
         return action(ctx, action_df, cmd_res=cmd_res).invoke()
     except Exception as ex:
         LOG.error("ERROR: Action '%s' execution error: %s", action_df.id, ex)
@@ -836,7 +889,13 @@ class ExecAction(GeneralAction):
         return params_env
 
     def _get_executable(self) -> str:
-        return self.ctx.params.get('executable')
+        exe = self.params.get('executable', self.ctx.params.get('executable'))
+        if Path(exe).exists():
+            return exe
+        win_exe = f"{exe}.exe"
+        if Path(win_exe).exists():
+            return win_exe
+        return exe
 
     def _get_args(self) -> List[str]:
         return self.params.get('args', [])
@@ -943,6 +1002,12 @@ class FileValidation(GeneralAction):
         })
 
     def _compare_file_content(self, provided: Path, exp: Path) -> 'ActionResult':
+        if shutil.which('diff') is not None:
+            return self._compare_file_content_diff(provided, exp)
+
+        return self._compare_file_content_python(provided, exp)
+
+    def _compare_file_content_diff(self, provided: Path, exp: Path) -> 'ActionResult':
         exp = self.ctx.resolve_data_file(exp)
         diff_params: List[str] = self.ctx.params.get('diff_params', [])
         diff_params.append('--strip-trailing-cr')
@@ -962,6 +1027,20 @@ class FileValidation(GeneralAction):
         }
         return self._make_result(
             diff_exec.exit == 0,
+            msg="Files content is not a same!",
+            detail=detail
+        )
+
+    def _compare_file_content_python(self, provided: Path, exp: Path):
+        # TODO use https://docs.python.org/3/library/difflib.html#module-difflib
+        res = filecmp.cmp(str(exp), str(provided), shallow=False)
+        detail = {
+            'expected': str(exp),
+            'provided': str(provided),
+            'same': res,
+        }
+        return self._make_result(
+            res,
             msg="Files content is not a same!",
             detail=detail
         )
@@ -1049,6 +1128,72 @@ class ExitCodeValidation(GeneralAction):
         })
 
 
+###
+# Builders
+###
+
+class BuildAction(GeneralAction):
+    @classmethod
+    def resolve_build_dir(cls, root_dir: 'Path') -> Path:
+        build_dir = root_dir / 'build'
+        if not build_dir.exists():
+            LOG.debug("[BLD] Creating build dir: %s", build_dir)
+            build_dir.mkdir(parents=True)
+        return build_dir
+
+    def _run(self) -> 'ActionResult':
+        pass
+
+    def _exec_build(self, exe: str, args: List[str]):
+        try:
+            self.cmd_res = self._exec_build_cmd(exe, args)
+            return self._make_pass("Build succeeded")
+        except FileNotFoundError as ex:
+            return self._make_fail(f"Command not found '{exe}': {ex}", detail=ex)
+
+        except Exception as ex:
+            return self._make_fail(f"Command failed '{exe}': {ex}", detail=ex)
+
+    def _resolve_build_dir(self):
+        root_dir = self.ctx.tests_dir
+        return self.resolve_build_dir(root_dir)
+
+    def _exec_build_cmd(self, exe: str, args: List[str]) -> CommandResult:
+        return execute_cmd(
+            exe,
+            args=args,
+            ws=self.ctx.ws(True),
+            cwd=str(self.ctx.tests_dir),
+            nm=self.df.parent.id + "_" + self.NAME,
+        )
+
+
+class CMakeBuildAction(BuildAction):
+    NAME = 'bld_cmake'
+
+    @classmethod
+    def make_df(cls, params: DParams) -> 'ActionDf':
+        return cls._make_df(params, "Build executable using cmake")
+
+    def _run(self) -> 'ActionResult':
+        global_args = self.ctx.params.get('cmake_args', ["-G", "Unix Makefiles"])
+        args = self.params.get('args', [])
+        return self._exec_build('cmake', [*args, *global_args])
+
+
+class MakeBuildAction(BuildAction):
+    NAME = 'bld_make'
+
+    @classmethod
+    def make_df(cls, params: DParams) -> 'ActionDf':
+        return cls._make_df(params, "Build executable using make")
+
+    def _run(self) -> 'ActionResult':
+        global_args = self.ctx.params.get('make_args', [])
+        args = self.params.get('args', [])
+        return self._exec_build('make', [*args, *global_args])
+
+
 class ActionsRegister:
     INSTANCE = None
 
@@ -1064,6 +1209,9 @@ class ActionsRegister:
         instance.add(ExecAction)
         instance.add(FileValidation)
         instance.add(ExitCodeValidation)
+        # Builders
+        instance.add(CMakeBuildAction)
+        instance.add(MakeBuildAction)
         return instance
 
     def __init__(self):
@@ -1819,7 +1967,11 @@ class ConsoleReporter(Reporter):
         self.tcol: TColors = TColors(not cfg.get('no_color', False))
 
     def _prk(self, r: 'RunResultType') -> str:
-        color = self.tcol.RED if r.kind.is_fail() else self.tcol.GREEN
+        color = self.tcol.GREEN
+        if r.kind.is_fail():
+            color = self.tcol.RED
+        elif r.kind.is_skip():
+            color = self.tcol.YELLOW
         return self.tcol.wrap(color, f"[{r.kind.value.upper()}]")
 
     def report(self,
@@ -1897,18 +2049,20 @@ class JUnitReporter(Reporter):
     @classmethod
     def __make_junit_case(cls, test_res: 'TestResult'):
         import junitparser  # This will always succeed
+        cmd_res = test_res.cmd_res if isinstance(test_res.cmd_res, CommandResult) else None
+
         jcase = junitparser.TestCase(
             name=test_res.df.desc,
             classname=test_res.df.nm.str(),
-            time=test_res.cmd_res.elapsed / 1000000.0 if test_res.cmd_res else 0
+            time=cmd_res.elapsed / 1000000.0 if cmd_res else 0
         )
         if test_res.kind.is_pass():
             return jcase
 
         jcase.result = [cls._make_tc_fail(act) for act in test_res.actions]
-        if test_res.cmd_res:
-            jcase.system_out = str(test_res.cmd_res.stdout)
-            jcase.system_err = str(test_res.cmd_res.stderr)
+        if cmd_res:
+            jcase.system_out = str(cmd_res.stdout)
+            jcase.system_err = str(cmd_res.stderr)
         return jcase
 
     @classmethod
@@ -2001,6 +2155,10 @@ def make_cli_parser() -> argparse.ArgumentParser:
     _shared_options(sub_exec)
     sub_exec.add_argument('--with-actions', action='store_true', default=False,
                           help='Print out also report about all the actions')
+    sub_exec.add_argument('--dry-run', action='store_true', default=False,
+                          help='Dry run without directly executing any action')
+    sub_exec.add_argument('-B', '--build', type=str, default='none',
+                          help='Try to build a project using available build actions (cmake|auto|none)')
     sub_exec.set_defaults(func=cli_exec)
     return parser
 
@@ -2090,12 +2248,14 @@ class ParamParser:
 
 
 def _app_get_cfg(args: argparse.Namespace) -> 'RunParams':
-    app_cfg = dict(
-        tests_dir=args.tests,
-        executable=args.executable,
-        ws=args.workspace,
-        no_color=args.no_color
-    )
+    app_cfg = {
+        'tests_dir': args.tests,
+        'executable': args.executable,
+        'ws': args.workspace,
+        'no_color': args.no_color,
+        'build': args.build if 'build' in args.__dict__ else 'none',
+        'dry_run': args.dry_run if 'dry_run' in args.__dict__ else False,
+    }
 
     app_cfg.update(_parse_environ_params('EX'))
     defn = args.define
@@ -2107,7 +2267,7 @@ def _app_get_cfg(args: argparse.Namespace) -> 'RunParams':
     params = RunParams(app_cfg)
 
     load_logger(_get_log_level(args), log_file=(params.ws / 'tests.log'))
-
+    LOG.info("[CFG] Run Params: %s", json.dumps(params.d_serialize(), indent=2))
     LOG.info("[PATHS] Executable: %s", params.executable)
     LOG.info("[PATHS] Test dir: %s", params.tests_dir)
     LOG.info("[PATHS] Workspace: %s", params.ws)
