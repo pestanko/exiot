@@ -22,11 +22,12 @@ def run_params(tmp_path_factory, mini_base_dir: Path) -> RunParams:
     bld = build_cmake(mini_base_dir)
     assert bld
     assert bld.returncode == 0
-    return RunParams(dict(
-        tests_dir=mini_base_dir,
-        executable=None,
-        ws=tmp_path_factory.mktemp('prep_ws_mini_nimpl_source'),
-    ))
+    return RunParams({
+        'tests_dir': mini_base_dir,
+        'executable': None,
+        'ws': tmp_path_factory.mktemp('prep_ws_mini_nimpl_source'),
+        'build': 'none',
+    })
 
 
 @pytest.fixture(scope='module')

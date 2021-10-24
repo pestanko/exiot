@@ -85,6 +85,8 @@ Run tests in directory:
 python -m exiot -Linfo exec -E <EXECUTABLE> <TESTS_DIR>
 # Example:
 python -m exiot -Linfo exec -E ./myexec ./tests
+# Example with cmake build
+python -m exiot -Linfo exec --build=cmake <PATH_TO_TESTS>
 ```
 
 Run Mini Homeworks:
@@ -96,6 +98,18 @@ python -m exiot -Linfo exec -p minihw <PATH_TO_MINIHW>
 python -m exiot -Linfo exec -p minihw examples/minihw_not_impl
 # Example to run the solution
 python -m exiot -Linfo exec -D="target: solution" <PATH_TO_MINIHW>
+# Example with cmake build
+python -m exiot -Linfo exec --build=cmake <PATH_TO_MINIHW>
+```
+
+The build support is currently experimental, it requires ``cmake``, `make`, `gcc/clang`.
+The cmake build will create new directory in the ``TESTS_DIR`` and runs `cmake/make` there.
+
+How it might looks like:
+
+```shell
+cmake -B build
+make -k -C build
 ```
 
 ## Supported execution parameters
